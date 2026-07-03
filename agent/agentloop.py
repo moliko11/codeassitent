@@ -1,8 +1,10 @@
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from .state import AgentState
+
 from .Adapter import OpenAIAdapter
-from .models import ModelRequest
+from .models import  ModelRequest
 from .messages import Message
 from .tools import ToolExecutor
 from .tools import ToolRegistry
@@ -13,7 +15,7 @@ def agentloop(
     model_adapter: OpenAIAdapter,
     tool_executor: ToolExecutor,
     max_steps: int = 5,
-):
+) -> AgentState:
     """
     运行 Agent 主循环。
 
@@ -28,9 +30,10 @@ def agentloop(
     8. 进入下一轮，让模型基于工具结果继续推理。
     9. 如果超过 max_steps 仍未结束，则抛出异常，防止死循环。
     """
+    state = AgentState(max_steps=max_steps)
 
     # 1. 初始化对话消息
-    messages = [
+    state.messages = [
         Message(role="user", content=user_input)
     ]
 
@@ -42,42 +45,59 @@ def agentloop(
     ]
 
     # 3. 多轮 Agent Loop
-    for step in range(max_steps):
+    while state.should_continue():
+        step=state.new_step()
         # 4. 构造本轮模型请求
-        model_request = ModelRequest(
-            messages=messages,
+        try:
+            model_request = ModelRequest(
+            messages=state.messages,
             tools=tools,
             model="deepseek-v4-pro",
             temperature=0.7,
-            max_tokens=500,
-        )
+            max_tokens=500,)
+            step.model_request = model_request
+            # 5. 调用模型 
+            model_response = model_adapter.call_llm(model_request)
+            
+            step.model_response = model_response
+            # 6. 如果模型没有请求工具调用，说明已经得到最终回答
+            if not model_response.tool_calls:
+                state.complete(model_response)
+                step.finish()
+                return state
 
-        # 5. 调用模型
-        model_response = model_adapter.call_llm(model_request)
+            # 7. 执行当前轮模型返回的所有工具调用
+            tool_results = []
 
-        # 6. 如果模型没有请求工具调用，说明已经得到最终回答
-        if not model_response.tool_calls:
-            return model_response
+            for tool_call in model_response.tool_calls:
+                tool_result = tool_executor.execute(tool_call)
+                tool_results.append(tool_result)
 
-        # 7. 执行当前轮模型返回的所有工具调用
-        tool_results = []
+            # 8. 将本轮 assistant tool_calls 和 tool_results 回填到 messages
+            # 注意：具体怎么组织 OpenAI / Claude / DeepSeek 的消息格式，
+            # 应该交给 model_adapter.append_tool_results 处理
+            state.messages = model_adapter.append_tool_results(
+                messages=state.messages,
+                model_response=model_response,
+                tool_results=tool_results,
+            )
+            step.finish()
+        
+        except Exception as e:
+            error = {
+                "type": type(e).__name__,
+                "message": str(e),
+                "souce":"agentloop",
+            }
+            step.error = error
+            step.finish()
 
-        for tool_call in model_response.tool_calls:
-            tool_result = tool_executor.execute(tool_call)
-            tool_results.append(tool_result)
+            state.fail(error)
+            return state
 
-        # 8. 将本轮 assistant tool_calls 和 tool_results 回填到 messages
-        # 注意：具体怎么组织 OpenAI / Claude / DeepSeek 的消息格式，
-        # 应该交给 model_adapter.append_tool_results 处理
-        messages = model_adapter.append_tool_results(
-            messages=messages,
-            model_response=model_response,
-            tool_results=tool_results,
-        )
+    state.fail({"type": "超过最大步数", "message": f"agent超过了最大步数={max_steps}"})
 
-    # 9. 超过最大步数仍然没有最终回答，说明可能陷入工具调用循环
-    raise RuntimeError(f"Agent exceeded max_steps={max_steps}")
-
+    return state
 
 def run_agent_loop(registry: ToolRegistry, model_adapter: OpenAIAdapter, tool_executor: ToolExecutor):
     while True:
@@ -85,9 +105,11 @@ def run_agent_loop(registry: ToolRegistry, model_adapter: OpenAIAdapter, tool_ex
         if user_input.lower() in ["exit", "quit"]:
             print("Exiting agent loop.")
             break
-        final_response = agentloop(user_input, registry, model_adapter, tool_executor)
-        print(f"Agent: {final_response}")
-        print(f"Agent: {final_response.text}")
+        state = agentloop(user_input, registry, model_adapter, tool_executor)
+        if state.error:
+            print(f"Agent encountered an error: {state.error}")
+        elif state.final_response is not None:
+            print(f"Agent: {state.final_response.text}")
 
 def main():
     # 用 tools.py 模块级的 registry：@tool 装饰器把 getnowtime 注册到了那里
@@ -98,7 +120,5 @@ def main():
 
     # 运行Agent循环
     run_agent_loop(registry, model_adapter, tool_executor)
-
-
 if __name__ == "__main__":
     main()
