@@ -1,16 +1,23 @@
 from dataclasses import dataclass, field
+import time
 from typing import Any, Optional
 
-from .config import AgentConfig
+from .control.actions import Action, decide
 
-from .state import AgentState
+from .control.timeout import call_with_timeout
+from .prompts import SOFT_STOP_HINT
 
-from .Adapter import OpenAIAdapter
-from .models import  ModelRequest
-from .messages import Message
+from .control.loop_detector import LoopDetector
+
+from .config.config import AgentConfig
+from .config.provider import load_provider_config, make_adapter
+from .core.state import AgentState
+
+from .adapters.base import BaseModelAdapter
+from .core.models import ModelRequest
+from .core.messages import Message
 from .runtime import RuntimeContext
-from .tools import ToolExecutor
-from .tools import ToolRegistry
+from .tools.registry import ToolExecutor, ToolRegistry
 
 def agentloop(
     user_input: str,
@@ -32,7 +39,7 @@ def agentloop(
     """
     config = context.config or AgentConfig()
     state = context.state or AgentState(max_steps=config.max_steps)
-
+    loop_detector = LoopDetector(threshold=config.soft_stop_threshold)
     # 1. 初始化对话消息（system prompt 放第一条，定义 Agent 的行为契约）
     state.messages = []
     if config.system_prompt:
@@ -51,6 +58,8 @@ def agentloop(
     # 3. 多轮 Agent Loop
     while state.should_continue():
         step=state.new_step()
+
+        step.deadline = time.perf_counter() + config.step_timeout  # 记录本轮执行截止时间
         # 4. 构造本轮模型请求
         try:
             model_request = ModelRequest(
@@ -61,21 +70,28 @@ def agentloop(
             max_tokens=context.config.max_tokens,)
             step.model_request = model_request
             # 5. 调用模型 
-            model_response = context.model_adapter.call_llm(model_request)
+            # model_response = context.model_adapter.call_llm(model_request)
+            model_response = call_with_timeout(
+                context.model_adapter.call_llm, model_request,
+                timeout=config.step_timeout,
+            )
             
             step.model_response = model_response
             # 6. 如果模型没有请求工具调用，说明已经得到最终回答
-            if not model_response.tool_calls:
+            action = decide(model_response)
+            if action == Action.FINISH:
                 state.complete(model_response)
                 step.finish()
                 return state
+            if action == Action.HANDLE_ERROR:
+                raise ValueError("模型返回既无文本也无工具调用")  # 走下面的错误回填
+
 
             # 7. 执行当前轮模型返回的所有工具调用
-            tool_results = []
-
-            for tool_call in model_response.tool_calls:
-                tool_result = context.tool_executor.execute(tool_call)
-                tool_results.append(tool_result)
+            # action == CALL_TOOLS：执行工具，每个包 timeout
+            tool_results = context.tool_executor.execute_many(
+                model_response.tool_calls, timeout=config.step_timeout
+            )
 
             # 8. 将本轮 assistant tool_calls 和 tool_results 回填到 messages
             # 注意：具体怎么组织 OpenAI / Claude / DeepSeek 的消息格式，
@@ -85,9 +101,26 @@ def agentloop(
                 model_response=model_response,
                 tool_results=tool_results,
             )
-            state.reset_error()  # 记录本轮工具调用成功，连续失败计数清零
-            step.finish()
-        
+
+            # 失败兜底 成功循环检测
+            if any(not r.ok for r in tool_results):
+                state.record_error()  # 记录本轮工具调用失败，连续失败计数加1
+                if state.consecutive_tool_failures >= config.max_consecutive_tool_failures:
+                    state.fail({"type":"ToolFailure",
+                                "message":f"连续工具调用失败次数{state.consecutive_tool_failures}超过阈值{config.max_consecutive_tool_failures}"})
+                    return state
+            else:
+                state.reset_error()  # 本轮工具调用成功，连续失败计数清零
+
+                loop_detector.observe(model_response.tool_calls)
+
+                if loop_detector.is_looping():
+                    state.messages.append(Message(
+                        role="user",
+                        content=SOFT_STOP_HINT.format(step=step.index,tool=tool_results[0].tool_name),
+                    ))
+                    loop_detector.reset()  # 重置循环检测器，避免重复注入软终止提示
+                
         except Exception as e:
             error = {
                 "type": type(e).__name__,
@@ -118,7 +151,7 @@ def agentloop(
 
     return state
 
-def run_agent_loop(registry: ToolRegistry, model_adapter: OpenAIAdapter, tool_executor: ToolExecutor):
+def run_agent_loop(registry: ToolRegistry, model_adapter: BaseModelAdapter, tool_executor: ToolExecutor, config: Optional[AgentConfig] = None):
     while True:
         user_input = input("User: ")
         if user_input.lower() in ["exit", "quit"]:
@@ -128,7 +161,7 @@ def run_agent_loop(registry: ToolRegistry, model_adapter: OpenAIAdapter, tool_ex
             registry=registry,
             model_adapter=model_adapter,
             tool_executor=tool_executor,
-            config=AgentConfig(),
+            config=config or AgentConfig(),
             state=AgentState()
         )
         state = agentloop(user_input, context)
@@ -138,13 +171,17 @@ def run_agent_loop(registry: ToolRegistry, model_adapter: OpenAIAdapter, tool_ex
             print(f"Agent: {state.final_response.text}")
 
 def main():
-    # 用 tools.py 模块级的 registry：@tool 装饰器把 getnowtime 注册到了那里
+    # 用 tools 子包的默认 registry：@tool 装饰器把 getnowtime 注册到了那里
     import agent.tools
     registry = agent.tools.registry
-    model_adapter = OpenAIAdapter()
+    # 默认用 openai_compatible(DeepSeek)；切豆包改 "ark"
+    pc = load_provider_config("openai_compatible")
+    if not pc.api_key:
+        raise SystemExit("未设置 DEEPSEEK_API_KEY，请在 code/.env 配置 DEEPSEEK_API_KEY/BASE_URL/MODEL")
+    model_adapter = make_adapter(pc)
     tool_executor = ToolExecutor(registry)
-
-    # 运行Agent循环
-    run_agent_loop(registry, model_adapter, tool_executor)
+    # 用 provider 配置里的 model（DEEPSEEK_MODEL）覆盖 AgentConfig 默认的 deepseek-v4-pro，
+    # 否则 agentloop 会把 context.config.model 直接发给 API，provider 的 model 形同虚设。
+    run_agent_loop(registry, model_adapter, tool_executor, config=AgentConfig(model=pc.model))
 if __name__ == "__main__":
     main()

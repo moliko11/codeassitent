@@ -2,16 +2,16 @@
 # 单独成层，避免 messages.py 反向依赖 state / Adapter 等上层模块
 from dataclasses import dataclass
 
-from .tools import ToolRegistry, ToolExecutor
-from .Adapter import OpenAIAdapter
-from .config import AgentConfig
-from .state import AgentState
+from .adapters.base import BaseModelAdapter
+from .config.config import AgentConfig
+from .core.state import AgentState
+from .tools.registry import ToolExecutor, ToolRegistry
 
 
 @dataclass
 class RuntimeContext:
     registry: ToolRegistry
     tool_executor: ToolExecutor
-    model_adapter: OpenAIAdapter
+    model_adapter: BaseModelAdapter
     config: AgentConfig
     state: AgentState
