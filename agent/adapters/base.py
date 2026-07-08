@@ -5,6 +5,8 @@ from abc import ABC, abstractmethod
 from ..core.messages import Message
 from ..core.models import ModelRequest, ModelResponse
 from ..tools.defs import ToolResult
+from ..streaming.sink import EventSink
+from ..streaming.events import TextDelta, ToolCallStart, ToolCallEnd, MessageEnd
 
 
 class BaseModelAdapter(ABC):
@@ -26,6 +28,24 @@ class BaseModelAdapter(ABC):
     @abstractmethod
     def call_llm(self, request: ModelRequest) -> ModelResponse:
         """ModelRequest(统一) -> provider请求 -> 调API -> ModelResponse(统一)"""
+
+    def stream_llm(self, request: ModelRequest, sink: EventSink) -> ModelResponse:
+        """流式调用 LLM：边收边把增量事件推给 sink，返回累积好的 ModelResponse。
+
+        默认实现：退化为阻塞 call_llm，再把整包拆成事件一次性推给 sink。
+        真实 provider 子类覆盖此方法做逐 token 流式（见 openai_compat / ark）。
+
+        兼容性关键：不支持流式的 provider 与测试 mock 只需实现 call_llm，
+        即可自动获得本方法 -> 流式对它们透明（只是「一次吐整段」而非逐 token）。
+        """
+        resp = self.call_llm(request)
+        if resp.text:
+            sink.emit(TextDelta(text=resp.text))
+        for i, tc in enumerate(resp.tool_calls):
+            sink.emit(ToolCallStart(call_id=tc.call_id, tool_name=tc.tool_name, index=i))
+            sink.emit(ToolCallEnd(call_id=tc.call_id))
+        sink.emit(MessageEnd(stop_reason=resp.stop_reason, usage=resp.usage))
+        return resp
 
     @abstractmethod
     def append_tool_results(

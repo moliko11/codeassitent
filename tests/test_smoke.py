@@ -22,13 +22,20 @@ from agent.core.errors import IllegalTransitionError
 from agent.tools.registry import ToolRegistry, ToolExecutor
 from agent.tools.defs import ToolCall
 from agent.core.models import ModelResponse
+from agent.adapters.base import BaseModelAdapter
 
 
-class _ScriptedAdapter:
+class _ScriptedAdapter(BaseModelAdapter):
     """按脚本返回 ModelResponse 的假适配器：
-    前 tool_rounds 轮返回 tool_calls，之后返回 text(final answer)。"""
+    前 tool_rounds 轮返回 tool_calls，之后返回 text(final answer)。
+
+    继承 BaseModelAdapter 以获得默认 stream_llm（退化为 call_llm + 一次性推事件），
+    使流式路径对测试透明：agentloop 调 stream_llm -> 走 call_llm 脚本。
+    """
 
     def __init__(self, tool_rounds: int):
+        # 测试不依赖真实 provider 凭据；默认 stream_llm 只用 call_llm，无需它们
+        super().__init__(api_key="", base_url="", model="")
         self.n = 0
         self.tool_rounds = tool_rounds
 

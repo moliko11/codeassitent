@@ -7,6 +7,8 @@ from openai import OpenAI
 from ..core.messages import Message
 from ..core.models import ModelRequest, ModelResponse, TokenUsage
 from ..tools.defs import ToolCall, ToolResult, ToolSpec
+from ..streaming.sink import EventSink
+from ..streaming.events import TextDelta, ToolCallStart, ToolCallDelta, ToolCallEnd, MessageEnd
 from .base import BaseModelAdapter
 
 
@@ -45,6 +47,117 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
 
         response = self.client.chat.completions.create(**kwargs)
         return self._from_chat_response(response)
+
+    def stream_llm(self, request: ModelRequest, sink: EventSink) -> ModelResponse:
+        """Chat Completions 真流式：stream=True 逐 chunk 迭代，边收边推事件。
+
+        - delta.content -> TextDelta（逐 token 文本）
+        - delta.tool_calls[i]：首次见 index i 发 ToolCallStart（拿 id/name）；
+          后续 function.arguments 发 ToolCallDelta，累积进 args 缓冲
+        - 收尾：每个 tool_call 发 ToolCallEnd + json.loads 解析参数；发 MessageEnd(usage)
+        - 返回累积好的 ModelResponse（字段与 _from_chat_response 一致）
+
+        异常（超时/认证/限流）原样抛出，交由 agentloop 的 classify_error 处理。
+        """
+        messages = self._to_chat_messages(request.messages)
+        tools = self._to_chat_tools(request.tools)
+
+        kwargs: dict[str, Any] = {
+            "model": request.model or self.model,
+            "messages": messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if tools:
+            kwargs["tools"] = tools
+        if request.temperature is not None:
+            kwargs["temperature"] = request.temperature
+        if request.max_tokens is not None:
+            kwargs["max_tokens"] = request.max_tokens
+        if "tool_choice" in request.meta:
+            kwargs["tool_choice"] = request.meta["tool_choice"]
+        if "parallel_tool_calls" in request.meta:
+            kwargs["parallel_tool_calls"] = request.meta["parallel_tool_calls"]
+
+        stream = self.client.chat.completions.create(**kwargs)
+
+        text_parts: list[str] = []
+        tool_acc: dict[int, dict[str, Any]] = {}  # index -> {call_id, name, args}
+        usage: TokenUsage | None = None
+        stop_reason: str | None = None
+        response_id: str | None = None
+
+        for chunk in stream:
+            if getattr(chunk, "id", None):
+                response_id = chunk.id
+            # usage-only chunk（choices 为空）通常在流末尾
+            if getattr(chunk, "usage", None) is not None:
+                u = chunk.usage
+                usage = TokenUsage(
+                    input_tokens=getattr(u, "prompt_tokens", 0) or 0,
+                    output_tokens=getattr(u, "completion_tokens", 0) or 0,
+                    total_tokens=getattr(u, "total_tokens", 0) or 0,
+                )
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+            choice = choices[0]
+            delta = choice.delta
+
+            # 文本增量
+            content = getattr(delta, "content", None)
+            if content:
+                text_parts.append(content)
+                sink.emit(TextDelta(text=content))
+
+            # 工具调用增量
+            for tc_delta in getattr(delta, "tool_calls", None) or []:
+                idx = tc_delta.index if tc_delta.index is not None else 0
+                acc = tool_acc.get(idx)
+                if acc is None:
+                    # 首次：id / name 只在首帧出现
+                    call_id = getattr(tc_delta, "id", None) or ""
+                    fn = getattr(tc_delta, "function", None)
+                    name = (getattr(fn, "name", None) or "") if fn else ""
+                    acc = {"call_id": call_id, "name": name, "args": ""}
+                    tool_acc[idx] = acc
+                    sink.emit(ToolCallStart(call_id=call_id, tool_name=name, index=idx))
+                fn = getattr(tc_delta, "function", None)
+                arg_chunk = getattr(fn, "arguments", None) if fn else None
+                if arg_chunk:
+                    acc["args"] += arg_chunk
+                    sink.emit(ToolCallDelta(call_id=acc["call_id"], arguments_delta=arg_chunk))
+
+            if getattr(choice, "finish_reason", None):
+                stop_reason = choice.finish_reason
+
+        # 收尾：解析每个 tool_call 的完整参数
+        tool_calls: list[ToolCall] = []
+        for idx in sorted(tool_acc):
+            acc = tool_acc[idx]
+            sink.emit(ToolCallEnd(call_id=acc["call_id"]))
+            try:
+                parsed_args = json.loads(acc["args"]) if acc["args"] else {}
+            except json.JSONDecodeError:
+                parsed_args = {"_raw_arguments": acc["args"]}
+            tool_calls.append(ToolCall(
+                call_id=acc["call_id"],
+                tool_name=acc["name"],
+                arguments=parsed_args,
+                meta={"provider": "openai_compatible", "tool_call_id": acc["call_id"]},
+            ))
+
+        sink.emit(MessageEnd(stop_reason=stop_reason, usage=usage))
+
+        return ModelResponse(
+            response_id=response_id,
+            text="".join(text_parts) or None,
+            tool_calls=tool_calls,
+            usage=usage,
+            stop_reason=stop_reason,
+            raw=None,
+            meta={"provider": "openai_compatible", "streamed": True},
+        )
 
     def _to_chat_messages(self, messages: list[Message]) -> list[dict[str, Any]]:
         """把内部 Message 转成 Chat Completions 的 messages 数组。

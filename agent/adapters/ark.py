@@ -7,6 +7,8 @@ from openai import OpenAI
 from ..core.messages import Message
 from ..core.models import ModelRequest, ModelResponse, TokenUsage
 from ..tools.defs import ToolCall, ToolResult, ToolSpec
+from ..streaming.sink import EventSink
+from ..streaming.events import TextDelta, ToolCallStart, ToolCallDelta, ToolCallEnd, MessageEnd
 from .base import BaseModelAdapter
 
 
@@ -46,6 +48,131 @@ class ArkAdapter(BaseModelAdapter):
 
         response = self.client.responses.create(**kwargs)
         return self._from_response(response)
+
+    def stream_llm(self, request: ModelRequest, sink: EventSink) -> ModelResponse:
+        """Responses API 真流式：stream=True，按 event.type 分发增量事件。
+
+        Ark/Responses 流式事件（用 getattr 容错不同 SDK 版本的字段名）：
+        - response.output_text.delta          -> TextDelta
+        - response.output_item.added          -> 识别 function_call -> ToolCallStart
+        - response.function_call_arguments.delta -> ToolCallDelta（按 item_id 累积）
+        - response.function_call_arguments.done  -> ToolCallEnd
+        - response.completed                  -> MessageEnd（取 usage/status）
+        - response.output_text.done           -> 兜底整段文本（若没收到 delta）
+
+        异常原样抛出，交由 agentloop 的 classify_error 处理。
+        """
+        input_items = self._to_input(request.messages)
+        kwargs: dict[str, Any] = {
+            "model": request.model or self.model,
+            "input": input_items,
+            "stream": True,
+        }
+        tools = self._build_tools(request.tools)
+        if tools:
+            kwargs["tools"] = tools
+        if request.temperature is not None:
+            kwargs["temperature"] = request.temperature
+        if request.max_tokens is not None:
+            kwargs["max_output_tokens"] = request.max_tokens
+
+        stream = self.client.responses.create(**kwargs)
+
+        text_parts: list[str] = []
+        tool_acc: dict[str, dict[str, Any]] = {}  # item_id -> {call_id, name, args}
+        ended_ids: set[str] = set()
+        usage: TokenUsage | None = None
+        stop_reason: str | None = None
+        response_id: str | None = None
+
+        for event in stream:
+            etype = getattr(event, "type", "")
+
+            if etype == "response.output_text.delta":
+                d = getattr(event, "delta", "") or ""
+                if d:
+                    text_parts.append(d)
+                    sink.emit(TextDelta(text=d))
+
+            elif etype == "response.output_item.added":
+                item = getattr(event, "item", None)
+                if item is not None and getattr(item, "type", None) == "function_call":
+                    item_id = getattr(item, "id", None) or ""
+                    call_id = getattr(item, "call_id", None) or item_id
+                    name = getattr(item, "name", "") or ""
+                    tool_acc[item_id] = {"call_id": call_id, "name": name, "args": ""}
+                    sink.emit(ToolCallStart(
+                        call_id=call_id, tool_name=name, index=len(tool_acc) - 1))
+
+            elif etype == "response.function_call_arguments.delta":
+                item_id = getattr(event, "item_id", None) or ""
+                acc = tool_acc.get(item_id)
+                if acc is not None:
+                    d = getattr(event, "delta", "") or ""
+                    if d:
+                        acc["args"] += d
+                        sink.emit(ToolCallDelta(call_id=acc["call_id"], arguments_delta=d))
+
+            elif etype == "response.function_call_arguments.done":
+                item_id = getattr(event, "item_id", None) or ""
+                acc = tool_acc.get(item_id)
+                if acc is not None:
+                    final_args = getattr(event, "arguments", None)
+                    if final_args:
+                        acc["args"] = final_args
+                    sink.emit(ToolCallEnd(call_id=acc["call_id"]))
+                    ended_ids.add(item_id)
+
+            elif etype == "response.output_text.done":
+                # 兜底：若全程没收到 delta（某些 provider 只发 done），用 done 的整段文本
+                if not text_parts:
+                    d = getattr(event, "text", "") or ""
+                    if d:
+                        text_parts.append(d)
+                        sink.emit(TextDelta(text=d))
+
+            elif etype == "response.completed":
+                resp = getattr(event, "response", None)
+                if resp is not None:
+                    response_id = getattr(resp, "id", None)
+                    stop_reason = getattr(resp, "status", None)
+                    u = getattr(resp, "usage", None)
+                    if u is not None:
+                        usage = TokenUsage(
+                            input_tokens=getattr(u, "input_tokens", 0) or 0,
+                            output_tokens=getattr(u, "output_tokens", 0) or 0,
+                            total_tokens=getattr(u, "total_tokens", 0) or 0,
+                        )
+
+        # 收尾：对未收到 done 事件的 tool_call 补发 ToolCallEnd
+        for item_id, acc in tool_acc.items():
+            if item_id not in ended_ids:
+                sink.emit(ToolCallEnd(call_id=acc["call_id"]))
+
+        tool_calls: list[ToolCall] = []
+        for acc in tool_acc.values():
+            try:
+                parsed_args = json.loads(acc["args"]) if acc["args"] else {}
+            except json.JSONDecodeError:
+                parsed_args = {"_raw_arguments": acc["args"]}
+            tool_calls.append(ToolCall(
+                call_id=acc["call_id"],
+                tool_name=acc["name"],
+                arguments=parsed_args,
+                meta={"provider": "ark"},
+            ))
+
+        sink.emit(MessageEnd(stop_reason=stop_reason, usage=usage))
+
+        return ModelResponse(
+            response_id=response_id,
+            text="".join(text_parts) or None,
+            tool_calls=tool_calls,
+            usage=usage,
+            stop_reason=stop_reason,
+            raw=None,
+            meta={"provider": "ark", "streamed": True},
+        )
 
     def _to_input(self, messages: list[Message]) -> list[dict[str, Any]]:
         """内部 messages -> Ark input 数组。
