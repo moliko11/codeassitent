@@ -1,0 +1,22 @@
+# Python 字节码与缓存
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 环境变量 / 密钥
+.env
+.env.local
+*.key
+
+# IDE
+.vscode/
+.idea/
+
+# 操作系统
+.DS_Store
+Thumbs.db
