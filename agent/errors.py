@@ -1,3 +1,6 @@
+from dataclasses import dataclass, field
+from typing import Any, Optional
+
 @dataclass
 class ErrorInfo:
     """全局统一错误信息模型"""
