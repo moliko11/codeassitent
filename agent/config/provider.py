@@ -31,28 +31,28 @@ class ProviderConfig:
 _ENV_PREFIX = {"openai_compatible": "DEEPSEEK", "ark": "VOLCANO_ENGINE"}
 
 
-# def load_provider_config(provider: str) -> ProviderConfig:
-#     """从环境变量加载指定 provider 的配置"""
-#     prefix = _ENV_PREFIX.get(provider)
-#     if prefix is None:
-#         raise ValueError(f"unknown provider: {provider}，可选: {list(_ENV_PREFIX)}")
-#     return ProviderConfig(
-#         provider=provider,
-#         api_key=os.environ.get(f"{prefix}_API_KEY", ""),
-#         base_url=os.environ.get(f"{prefix}_BASE_URL", ""),
-#         model=os.environ.get(f"{prefix}_MODEL", ""),
-#     )
 def load_provider_config(provider: str) -> ProviderConfig:
     """从环境变量加载指定 provider 的配置"""
     prefix = _ENV_PREFIX.get(provider)
     if prefix is None:
         raise ValueError(f"unknown provider: {provider}，可选: {list(_ENV_PREFIX)}")
     return ProviderConfig(
-        provider="ark",
-        api_key="ark-b7c08d49-6ed7-4f48-860e-6ac08f724c0c-c944b",
-        base_url="https://ark.cn-beijing.volces.com/api/coding/v3",
-        model="Doubao-Seed-2.0-lite",
+        provider=provider,
+        api_key=os.environ.get(f"{prefix}_API_KEY", "").strip(),
+        base_url=os.environ.get(f"{prefix}_BASE_URL", "").strip(),
+        model=os.environ.get(f"{prefix}_MODEL", "").strip(),
     )
+# def load_provider_config(provider: str) -> ProviderConfig:
+#     """从环境变量加载指定 provider 的配置"""
+#     prefix = _ENV_PREFIX.get(provider)
+#     if prefix is None:
+#         raise ValueError(f"unknown provider: {provider}，可选: {list(_ENV_PREFIX)}")
+#     return ProviderConfig(
+#         provider="ark",
+#         api_key="ark-b7c08d49-6ed7-4f48-860e-6ac08f724c0c-c944b",
+#         base_url="https://ark.cn-beijing.volces.com/api/coding/v3",
+#         model="Doubao-Seed-2.0-lite",
+#     )
 
 
 def make_adapter(pc: ProviderConfig):
