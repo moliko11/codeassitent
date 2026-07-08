@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 import time
 from typing import Any, Optional
+ 
+from .core.errors import classify_error
 
 from .control.actions import Action, decide
 
@@ -89,10 +91,11 @@ def agentloop(
 
             # 7. 执行当前轮模型返回的所有工具调用
             # action == CALL_TOOLS：执行工具，每个包 timeout
+            state.transition("waiting_tool")  # 进入等待工具执行状态
             tool_results = context.tool_executor.execute_many(
                 model_response.tool_calls, timeout=config.step_timeout
             )
-
+            print(f"[DEBUG] tool_results: {tool_results}")
             # 8. 将本轮 assistant tool_calls 和 tool_results 回填到 messages
             # 注意：具体怎么组织 OpenAI / Claude / DeepSeek 的消息格式，
             # 应该交给 model_adapter.append_tool_results 处理
@@ -101,6 +104,10 @@ def agentloop(
                 model_response=model_response,
                 tool_results=tool_results,
             )
+
+            # TODO:这里要把工具进行压缩放到tool_history里，避免每轮都把工具调用结果塞到messages里，导致上下文膨胀
+
+            state.transition("running")  # 工具执行完毕，回到 running 状态
 
             # 失败兜底 成功循环检测
             if any(not r.ok for r in tool_results):
@@ -122,32 +129,33 @@ def agentloop(
                     loop_detector.reset()  # 重置循环检测器，避免重复注入软终止提示
                 
         except Exception as e:
-            error = {
-                "type": type(e).__name__,
-                "message": str(e),
-                "source":"agentloop",
-                "retryable": True,
-            }
+            error = classify_error(e)
             step.error = error
             step.finish()
 
-            state.record_error()  # 记录本轮工具调用失败，连续失败计数加1
-
-            # 连续失败超过阈值
-            if state.consecutive_tool_failures >= config.max_consecutive_tool_failures:
+            # 不可重试（认证/参数/配置）：重试必失败，直接 fail，不回填模型、不浪费步数
+            if not error["retryable"]:
                 state.fail(error)
                 return state
 
-            # 否则把错误信息回填给模型当observation，让模型决定下一步怎么做
+            # 可重试：回填给模型当 observation，让模型调整；连续失败超阈值才 fail
+            state.record_error()
+            if state.consecutive_tool_failures >= config.max_consecutive_tool_failures:
+                state.fail(error)
+                return state
             state.messages.append(
-            Message(
-                role="user",
-                content=f"[系统提示] 上一步执行失败：{error['type']}: {error['message']}。"
-                        f"请根据错误信息调整下一步，或直接给出最终答案。",
+                Message(
+                    role="user",
+                    content=f"[系统提示] 上一步执行失败：{error['type']}: {error['message']}。"
+                            f"请根据错误信息调整下一步，或直接给出最终答案。",
+                )
             )
-        )
 
-    state.exceed_max_steps()
+    if not state.is_terminal():
+    
+        # Agent 循环超过最大步数，标记为失败
+    
+        state.exceed_max_steps()
 
     return state
 
@@ -175,7 +183,7 @@ def main():
     import agent.tools
     registry = agent.tools.registry
     # 默认用 openai_compatible(DeepSeek)；切豆包改 "ark"
-    pc = load_provider_config("openai_compatible")
+    pc = load_provider_config("ark")
     if not pc.api_key:
         raise SystemExit("未设置 DEEPSEEK_API_KEY，请在 code/.env 配置 DEEPSEEK_API_KEY/BASE_URL/MODEL")
     model_adapter = make_adapter(pc)
