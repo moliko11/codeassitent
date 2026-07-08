@@ -1,26 +1,9 @@
-# 对话角色枚举
+# 对话消息数据模型（最底层，仅依赖 enums）
+# 注意：本模块不依赖 state / Adapter / config 等上层，避免循环导入
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any
 
-# ====================== 全局枚举定义 ======================
-Role = Literal["system", "user", "assistant", "tool"]
-
-
-# Agent 运行状态枚举（可序列化）
-
-AgentStatus = Literal[
-    "created",        # 已创建未启动
-    "running",        # 运行中
-    "waiting_tool",   # 等待工具执行
-    "waiting_approval", # 等待人工审批
-    "completed",      # 正常完成
-    "failed",         # 运行失败
-    "cancelled",      # 主动取消
-    "max_steps_exceeded" # 超过最大步数限制
-]
-
-# 内容块类型（精细化消息结构使用）
-ContentType = Literal["text", "image", "tool_use", "tool_result", "reasoning"]
+from .enums import Role, ContentType
 
 
 @dataclass

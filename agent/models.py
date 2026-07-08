@@ -4,6 +4,7 @@ from .messages import Message
 from typing import Any, Optional
 from .tools import ToolSpec, ToolCall
 
+
 @dataclass
 class TokenUsage:
     """统一Token用量统计，适配所有模型厂商"""
