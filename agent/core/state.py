@@ -1,10 +1,27 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, is_dataclass
 import typing
 from .errors import IllegalTransitionError
 from .enums import AgentStatus
 from typing import Any, Optional
 import time
 import uuid
+
+
+def _ser(obj: Any) -> Any:
+    """递归序列化为可 JSON 化的纯结构：dataclass -> dict(跳过 raw)，
+    list/dict 递归，其他原样。产出可直接 json.dumps。
+
+    跳过 raw：ModelResponse.raw 等是 httpx Response 等不可序列化对象，
+    且 checkpoint 不需要持久化厂商原始响应。
+    用 vars() 逐字段递归（不用 asdict），确保嵌套 dataclass 的 raw 也被跳过。
+    """
+    if is_dataclass(obj) and not isinstance(obj, type):
+        return {k: _ser(v) for k, v in vars(obj).items() if k != "raw"}
+    if isinstance(obj, list):
+        return [_ser(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _ser(v) for k, v in obj.items()}
+    return obj
 
 
 @dataclass
@@ -39,10 +56,10 @@ class AgentStep:
         """将 AgentStep 转换为字典"""
         return {
             "index": self.index,
-            "model_request": self.model_request,
-            "model_response": self.model_response,
-            "tool_calls": self.tool_calls,
-            "tool_results": self.tool_results,
+            "model_request": _ser(self.model_request),
+            "model_response": _ser(self.model_response),
+            "tool_calls": _ser(self.tool_calls),
+            "tool_results": _ser(self.tool_results),
             "error": self.error,
             "started_at": self.started_at,
             "ended_at": self.ended_at,
@@ -244,20 +261,21 @@ class AgentState:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "timeout_at": self.timeout_at,
-            "messages": self.messages,
+            "messages": _ser(self.messages),
             "steps": [step.to_dict() for step in self.steps],
             "step_index": self.step_index,
             "consecutive_tool_failures": self.consecutive_tool_failures,
             "max_steps": self.max_steps,
             "current_step": self.current_step.to_dict() if self.current_step else None,
-            "pending_tool_calls": self.pending_tool_calls,
-            "tool_history": self.tool_history,
+            "pending_tool_calls": _ser(self.pending_tool_calls),
+            "tool_history": _ser(self.tool_history),
             "status": self.status,
             "memory": self.memory,
             "context_summary": self.context_summary,
-            "final_response": self.final_response,
+            "final_response": _ser(self.final_response),
             "error": self.error,
             "meta": self.meta,
+            "version": self.version,
         }
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AgentState":
@@ -284,5 +302,6 @@ class AgentState:
             final_response=data.get("final_response"),
             error=data.get("error"),
             meta=data.get("meta", {}),
+            version=data.get("version"),
         )
         return state

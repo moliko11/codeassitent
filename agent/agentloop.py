@@ -13,7 +13,7 @@ from .control.loop_detector import LoopDetector
 
 from .config.config import AgentConfig
 from .config.provider import load_provider_config, make_adapter
-from .core.state import AgentState
+from .core.state import AgentState, ToolHistoryEntry
 
 from .adapters.base import BaseModelAdapter
 from .core.models import ModelRequest
@@ -105,7 +105,14 @@ def agentloop(
                 tool_results=tool_results,
             )
 
-            # TODO:这里要把工具进行压缩放到tool_history里，避免每轮都把工具调用结果塞到messages里，导致上下文膨胀
+            # 工具调用摘要写入 tool_history（只存 call_id/ok/error_type，防状态膨胀；完整轨迹在 steps）
+            for r in tool_results:
+                state.tool_history.append(ToolHistoryEntry(
+                    call_id=r.call_id,
+                    tool_name=r.tool_name,
+                    ok=r.ok,
+                    error_type=r.error.get("type") if r.error else None,
+                ))
 
             state.transition("running")  # 工具执行完毕，回到 running 状态
 
