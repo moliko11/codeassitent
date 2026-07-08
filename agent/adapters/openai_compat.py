@@ -1,126 +1,103 @@
+# OpenAI 兼容适配器（Chat Completions 协议）：DeepSeek / OpenAI 等
 import json
 from typing import Any
+
 from openai import OpenAI
 
-from agent.tools import ToolCall, ToolResult, ToolSpec
-from .messages import Message
-from .models import ModelRequest, ModelResponse, TokenUsage
+from ..core.messages import Message
+from ..core.models import ModelRequest, ModelResponse, TokenUsage
+from ..tools.defs import ToolCall, ToolResult, ToolSpec
+from .base import BaseModelAdapter
 
 
-class OpenAIAdapter:
-    def __init__(self, api_key: str | None = None):
-        # TODO: 这个 key 已暴露在源码里，建议去 DeepSeek 控制台重置后改用环境变量
-        self.client = OpenAI(
-            api_key="sk-91d255b4dc3b449d8975cb38461913d6",
-            base_url="https://api.deepseek.com",
-        )
+class OpenAICompatibleAdapter(BaseModelAdapter):
+    """适配 OpenAI Chat Completions 协议的供应商（DeepSeek/OpenAI 等）。
+
+    DeepSeek 兼容 /v1/chat/completions，但不支持 /v1/responses，
+    所以用 client.chat.completions.create 而非 client.responses.create。
+    """
+
+    provider = "openai_compatible"
+
+    def __init__(self, api_key: str, base_url: str, model: str):
+        super().__init__(api_key, base_url, model)
+        self.client = OpenAI(api_key=api_key, base_url=base_url)
 
     def call_llm(self, request: ModelRequest) -> ModelResponse:
-        """
-        把内部统一的 ModelRequest 转成 Chat Completions 请求，
-        再把 OpenAI 兼容响应转成内部统一的 ModelResponse。
-
-        DeepSeek 兼容 OpenAI 的 /v1/chat/completions，但不支持 /v1/responses，
-        所以这里用 client.chat.completions.create 而不是 client.responses.create。
-        """
         messages = self._to_chat_messages(request.messages)
         tools = self._to_chat_tools(request.tools)
 
         kwargs: dict[str, Any] = {
-            "model": request.model or "deepseek-v4-pro",
+            "model": request.model or self.model,
             "messages": messages,
         }
-
         if tools:
             kwargs["tools"] = tools
-
         if request.temperature is not None:
             kwargs["temperature"] = request.temperature
-
         if request.max_tokens is not None:
             # Chat Completions 用 max_tokens（不是 Responses API 的 max_output_tokens）
             kwargs["max_tokens"] = request.max_tokens
-
-        # 可选：透传一些 OpenAI 特有参数
         if "tool_choice" in request.meta:
             kwargs["tool_choice"] = request.meta["tool_choice"]
-
         if "parallel_tool_calls" in request.meta:
             kwargs["parallel_tool_calls"] = request.meta["parallel_tool_calls"]
 
         response = self.client.chat.completions.create(**kwargs)
-
         return self._from_chat_response(response)
 
     def _to_chat_messages(self, messages: list[Message]) -> list[dict[str, Any]]:
-        """
-        把内部 Message 转成 Chat Completions 的 messages 数组。
+        """把内部 Message 转成 Chat Completions 的 messages 数组。
 
-        约定：如果 msg.content 本身就是一条完整的 chat message dict（含 "role"），
+        约定：若 msg.content 本身就是一条完整的 chat message dict（含 "role"），
         就原样透传——用于携带 tool_calls 的 assistant 消息和 tool 结果消息。
         """
         items: list[dict[str, Any]] = []
-
         for msg in messages:
             if isinstance(msg.content, dict) and "role" in msg.content:
-                # 已经是 chat message dict，直接透传
                 items.append(msg.content)
                 continue
-
             if isinstance(msg.content, list):
-                # 多条 chat message 一起扩展
                 items.extend(msg.content)
                 continue
-
             items.append(
                 {
                     "role": msg.role,
                     "content": str(msg.content) if msg.content is not None else "",
                 }
             )
-
         return items
-
-    def _to_chat_tools(self, tool_specs: list[ToolSpec]) -> list[dict[str, Any]]:
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": ts.name,
-                    "description": ts.description,
-                    "parameters": ts.input_schema,
-                },
-            }
-            for ts in tool_specs
-        ]
+    def _to_chat_tools(self, tool_specs):
+        out = []
+        for ts in tool_specs:
+            desc = ts.description
+            if ts.returns:
+                desc += f"\n返回: {ts.returns}"
+            if ts.examples:
+                desc += f"\n示例: {json.dumps(ts.examples, ensure_ascii=False)}"
+            out.append({"type": "function", "function": {
+                "name": ts.name, "description": desc, "parameters": ts.input_schema}})
+        return out
 
     def _from_chat_response(self, response: Any) -> ModelResponse:
         choice = response.choices[0]
         msg = choice.message
 
         tool_calls: list[ToolCall] = []
-
         for tc in getattr(msg, "tool_calls", None) or []:
             fn = tc.function
             arguments = getattr(fn, "arguments", "{}") or "{}"
-
             try:
                 parsed_args = json.loads(arguments)
             except json.JSONDecodeError:
-                parsed_args = {
-                    "_raw_arguments": arguments
-                }
-
+                parsed_args = {"_raw_arguments": arguments}
             tool_calls.append(
                 ToolCall(
                     call_id=tc.id,
                     tool_name=fn.name,
                     arguments=parsed_args,
                     raw=tc.model_dump() if hasattr(tc, "model_dump") else tc,
-                    meta={
-                        "provider": "deepseek",
-                        "tool_call_id": tc.id,
-                    },
+                    meta={"provider": "openai_compatible", "tool_call_id": tc.id},
                 )
             )
 
@@ -139,9 +116,7 @@ class OpenAIAdapter:
             usage=usage,
             stop_reason=getattr(choice, "finish_reason", None),
             raw=response.model_dump() if hasattr(response, "model_dump") else response,
-            meta={
-                "provider": "deepseek",
-            },
+            meta={"provider": "openai_compatible"},
         )
 
     def append_tool_results(
@@ -150,9 +125,7 @@ class OpenAIAdapter:
         model_response: ModelResponse,
         tool_results: list[ToolResult],
     ) -> list[Message]:
-        """
-        把上一次模型返回的 assistant tool_calls 消息 + 各工具执行结果
-        一起追加到 messages，供下一次 Chat Completions 请求使用。
+        """回填 assistant tool_calls 消息 + 各工具结果。
 
         Chat Completions 要求：tool 结果消息之前必须有一条发起 tool_calls
         的 assistant 消息，且每条 tool 结果要带匹配的 tool_call_id。
@@ -176,7 +149,6 @@ class OpenAIAdapter:
                         },
                     }
                 )
-
             new_messages.append(
                 Message(
                     role="assistant",
@@ -202,30 +174,3 @@ class OpenAIAdapter:
             )
 
         return new_messages
-
-    def _tool_result_to_text(self, result: ToolResult) -> str:
-        if result.text is not None:
-            return result.text
-
-        if result.ok:
-            return json.dumps(
-                {
-                    "ok": True,
-                    "tool_name": result.tool_name,
-                    "data": result.data,
-                },
-                ensure_ascii=False,
-            )
-
-        return json.dumps(
-            {
-                "ok": False,
-                "tool_name": result.tool_name,
-                "error": {
-                    "type": result.error["type"] if result.error else "UnknownError",
-                    "message": result.error["message"] if result.error else "Unknown error",
-                    "retryable": result.error["retryable"] if result.error else False,
-                },
-            },
-            ensure_ascii=False,
-        )
