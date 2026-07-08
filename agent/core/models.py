@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from .messages import Message
 
 from typing import Any, Optional
-from .tools import ToolSpec, ToolCall
+from ..tools.defs import ToolSpec, ToolCall
 
 
 @dataclass

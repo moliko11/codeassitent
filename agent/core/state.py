@@ -1,7 +1,6 @@
 from dataclasses import dataclass, field
 from .enums import AgentStatus
 from typing import Any, Optional
-from .tools import ToolSpec, ToolCall
 import time
 import uuid
 
@@ -20,6 +19,8 @@ class AgentStep:
     started_at: float = field(default_factory=time.perf_counter)# Agent本轮开始时间
     ended_at: float | None = None # Agent本轮结束时间
     meta: dict[str, Any] = field(default_factory=dict)# Agent本轮元数据
+    
+    deadline: float | None = None # Agent本轮执行截止时间（可选）
 
     def finish(self):
         """标记本轮Agent循环结束"""
@@ -97,3 +98,4 @@ class AgentState:
     def should_continue(self) -> bool:
         """判断Agent循环是否应继续"""
         return self.status not in _TERMINAL_STATUSES and self.step_index < self.max_steps
+

@@ -11,3 +11,8 @@ class ErrorInfo:
     source: Optional[str] = None      # 错误来源（tool_executor / model_adapter / agent_runtime）
     code: Optional[str] = None       # 业务错误码
     meta: dict[str, Any] = field(default_factory=dict)  # 扩展元数据
+
+
+class StepTimeout(Exception):
+    """Agent 循环单轮超时异常"""
+    pass
