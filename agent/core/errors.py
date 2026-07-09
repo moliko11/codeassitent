@@ -47,3 +47,18 @@ def classify_error(e: BaseException) -> dict[str, Any]:
                 "retryable": False, "status_code": status}
     return {"type": name, "message": str(e), "source": "agentloop",
             "retryable": True, "status_code": status}
+
+
+class ToolTimeoutError(Exception):
+    """工具执行超时（单工具级，可重试）。与 StepTimeout（整轮超时）区分。"""
+    pass
+
+
+def classify_tool_error(e: BaseException) -> dict[str, Any]:
+    """给 tool handler 抛出的异常分类 retryable（类比 classify_error 处理模型异常）。"""
+    name = type(e).__name__
+    if isinstance(e, (TimeoutError, ToolTimeoutError, ConnectionError)):
+        return {"type": name, "message": str(e), "retryable": True, "source": "tool_executor"}
+    if isinstance(e, (ValueError, TypeError, KeyError, AttributeError)):
+        return {"type": name, "message": str(e), "retryable": False, "source": "tool_executor"}
+    return {"type": name, "message": str(e), "retryable": True, "source": "tool_executor"}

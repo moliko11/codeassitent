@@ -36,9 +36,17 @@ class ToolResultFormatter:
             return f"参数校验失败：{err.get('message', '')}。请按 schema 修正参数。"
         if t == "StepTimeout":
             return "工具执行超时，可重试或换一种方法。"
+        if t == "ToolTimeout":
+            return "工具执行超时，可重试或换一种方法。"
+        if t == "CircuitOpen":
+            return "工具执行失败，请换一种方法或基于已有信息作答。"
+        if t == "Cancelled":
+            return "操作被取消，可重试或换一种方法。"
         if t in ("KeyError", "TypeError", "ValueError"):
             return "参数缺失或类型不对，请检查必填字段。"
         return "工具执行失败，请换一种方法或基于已有信息作答。"
+
+        
 
     def _compress(self, text: str) -> str:
         if len(text) <= self.max_length:

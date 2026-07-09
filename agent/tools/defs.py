@@ -14,7 +14,8 @@ class ToolSpec:
     examples: list[dict[str, Any]] = field(default_factory=list)  # 示例调用
     returns:str=""
     meta: dict[str, Any] = field(default_factory=dict)
-
+    fallback_tool_name: str | None = None # TODO: 失败时 fallback 到另一个工具（如：调用模型失败时 fallback 到本地工具）
+    idempotent: bool = False # TODO: 是否幂等（同一 call_id 重复调用不会有副作用），用于幂等去重缓存
 
 @dataclass
 class Tool:
@@ -46,3 +47,4 @@ class ToolResult:
     error: dict[str, Any] | None = None     # 调用错误信息
     meta: dict[str, Any] = field(default_factory=dict)   # 元数据
     text: str | None = None  # 调用结果文本
+
