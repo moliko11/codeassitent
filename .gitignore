@@ -20,3 +20,6 @@ env/
 # 操作系统
 .DS_Store
 Thumbs.db
+
+# 临时笔记 / 架构图草稿（不进版本库）
+agent/供应商.txt

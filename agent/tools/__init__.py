@@ -2,6 +2,7 @@
 from .defs import Tool, ToolCall, ToolResult, ToolSpec
 from .registry import ToolExecutor, ToolRegistry, registry, tool
 from . import builtin  # 触发内置工具注册到 registry
+from . import test_tools  # 触发测试工具注册（tavily/读文件/grep）到 registry
 
 __all__ = [
     "Tool", "ToolCall", "ToolResult", "ToolSpec",
