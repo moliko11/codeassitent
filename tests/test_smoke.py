@@ -52,8 +52,14 @@ class _ScriptedAdapter(BaseModelAdapter):
             )
         return ModelResponse(text="done")
 
-    def append_tool_results(self, messages, model_response, tool_results):
+    def append_assistant(self, messages, model_response):
         return messages  # 测试不关心 provider 回填格式
+
+    def append_tool_result(self, messages, result):
+        return messages  # 测试不关心 provider 回填格式
+
+    def append_tool_results(self, messages, model_response, tool_results):
+        return messages  # 兼容旧接口（基类已有默认实现，此处保留原行为）
 
 
 def _run_agent(tool_rounds=2) -> AgentState:
