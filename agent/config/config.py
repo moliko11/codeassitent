@@ -9,7 +9,7 @@ class AgentConfig:
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     model: str = "deepseek-v4-pro"
     temperature: float = 0.7
-    max_tokens: int = 500
+    max_tokens: int = 5000
     max_steps: int = 5
     enable_tools: bool = True
     max_consecutive_tool_failures: int = 3 # 连续工具调用失败次数，超过则强制结束循环
