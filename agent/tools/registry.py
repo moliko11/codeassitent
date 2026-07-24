@@ -53,6 +53,7 @@ registry = ToolRegistry()
 
 def tool(name, description, input_schema, examples=None, returns="",
          idempotent=False, fallback_tool_name=None):
+        #  idempotent
     def decorator(func):
         registry.register(Tool(
             tool_spec=ToolSpec(name=name, description=description,
@@ -69,7 +70,8 @@ class ToolExecutor:
     def __init__(self, registry: ToolRegistry, formatter=None, *,
                  retry_policy: RetryPolicy = None, retry_mode="llm_retry",
                  breaker_config=BreakerConfig(), idempotency_store: IdempotencyStore = None,
-                 audit_logger: AuditLogger = None):
+                 audit_logger: AuditLogger = None,
+                 before_mutation=None):
         """工具执行器。
 
         可靠性参数（均可选，不传则该机制不生效）：
@@ -87,6 +89,7 @@ class ToolExecutor:
         self.idempotency_store = idempotency_store
         self.audit_logger = audit_logger
         self._breakers: dict[str, CircuitBreaker] = {}   # per-tool 懒建
+        self.before_mutation = before_mutation   # 留点：将来 FileEditTool 在这 track_edit(备份编辑前内容)
 
     def _get_breaker(self, tool_name) -> CircuitBreaker:
         return self._breakers.setdefault(tool_name, CircuitBreaker(self.breaker_config))
@@ -102,6 +105,10 @@ class ToolExecutor:
         tool, pre_err = self._precheck(call)
         if pre_err is not None:
             return self._done(pre_err, call, user_id, start_ts)
+
+        # 变更前钩子（留点：mutates_external 的工具编辑前备份，同 CC trackEdit）
+        if tool.tool_spec.mutates_external and self.before_mutation:
+            self.before_mutation(call)
 
         # 1. 幂等命中 -> 直接返回缓存
         if tool.tool_spec.idempotent and self.idempotency_store is not None:
@@ -169,15 +176,17 @@ class ToolExecutor:
         result.text = self.formatter.format(result)
         return result
 
+    # tools/registry.py -- execute_many 改 generator
     def execute_many(self, calls, timeout=None, *, cancel_event=None, user_id=None, sink=None):
-        """并行执行多个 tool_calls。有 depends_on 时按 DAG 层级并发。
+        """并行执行多个 tool_calls，按完成序 yield。有 depends_on 时按 DAG 层级并发。
 
         sink：可选 EventSink；传入则在每个工具开始/完成时发 ToolStart/ToolEnd。
-        cancel_event/user_id：透传给 execute（可靠性管道用）。
+        改 yield 后结果序=完成序（无妨：tool 结果按 call_id 匹配，不依赖顺序；live 与 replay 都用完成序，一致）。
         """
         if not any(c.depends_on for c in calls):
-            return self._parallel(calls, timeout, cancel_event=cancel_event, user_id=user_id, sink=sink)
-        return self._dag_execute(calls, timeout, cancel_event=cancel_event, user_id=user_id, sink=sink)
+            yield from self._parallel(calls, timeout, cancel_event=cancel_event, user_id=user_id, sink=sink)
+        else:
+            yield from self._dag_execute(calls, timeout, cancel_event=cancel_event, user_id=user_id, sink=sink)
 
     def _run_with_timeout(self, handler, args, timeout, cancel_event):
         """单工具超时包装。timeout=None 不限时。超时抛 ToolTimeoutError（可重试）。"""
@@ -253,22 +262,18 @@ class ToolExecutor:
                               error=classify_tool_error(e),
                               meta={**call.meta, "via_fallback": True})
 
+   # tools/registry.py -- _parallel 改 generator（删掉末尾的按序重组 return）
     def _parallel(self, calls, timeout=None, *, cancel_event=None, user_id=None, sink=None):
-        """并行执行一组无依赖的 tool_calls。
-
+        """并行执行一组无依赖的 tool_calls，按完成序 yield。
         streaming 层：as_completed（谁完成谁出）+ sink.emit(ToolStart/ToolEnd)。
-        可靠性：透传 cancel_event/user_id 给 execute（execute 内部走 retry/熔断/幂等/审计）。
-        ToolStart/ToolEnd 在本层发（而非 execute 内），这样超时杀死 future 时
-        不会与 execute 内部的事件重复（execute 保持纯净、不发事件）。
-        """
+        ToolStart/ToolEnd 在本层发（而非 execute 内），超时杀 future 不与 execute 内事件重复。"""
         from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout, as_completed
         if not calls:
-            return []
+            return
         if sink:
             for c in calls:
                 sink.emit(ToolStart(
                     call_id=c.call_id, tool_name=c.tool_name, arguments=c.arguments))
-        results_by_call_id: dict[str, ToolResult] = {}
         with ThreadPoolExecutor(max_workers=min(len(calls), 8)) as pool:
             fut_map = {pool.submit(self.execute, c, timeout=timeout,
                                    cancel_event=cancel_event, user_id=user_id): c for c in calls}
@@ -276,42 +281,33 @@ class ToolExecutor:
                 c = fut_map[fut]
                 try:
                     r = fut.result(timeout=timeout)
-                    results_by_call_id[c.call_id] = r
                     if sink:
                         sink.emit(ToolEnd(
                             call_id=r.call_id, tool_name=r.tool_name, ok=r.ok,
                             error_type=(r.error or {}).get("type") if r.error else None,
                             summary=_result_summary(r)))
+                    yield r
                 except FuturesTimeout:
                     r = self._finalize(ToolResult(
                         call_id=c.call_id, tool_name=c.tool_name, ok=False,
                         error={"type": "StepTimeout", "message": f"工具执行超时（{timeout}s）", "retryable": True},
                         meta=c.meta,
                     ))
-                    results_by_call_id[c.call_id] = r
                     if sink:
                         sink.emit(ToolEnd(
                             call_id=r.call_id, tool_name=r.tool_name, ok=False,
                             error_type="StepTimeout", summary=r.error["message"]))
-        # 保持与输入 calls 相同的顺序返回
-        return [results_by_call_id[c.call_id] for c in calls]
+                    yield r
 
-    def _dag_execute(self, calls: list[ToolCall], timeout=None, *, cancel_event=None, user_id=None, sink=None) -> list[ToolResult]:
-        """按 DAG 层级执行 tool_calls，支持 depends_on。每层并行，层级间串行。"""
-        # 1. 构建 call_id -> ToolCall 映射
-        by_id = {c.call_id: c for c in calls}
+    def _dag_execute(self, calls, timeout=None, *, cancel_event=None, user_id=None, sink=None):
+        """按 DAG 层级执行，每层并行、层级间串行，逐层 yield。"""
         done_ids: set[str] = set()
-        results: list[ToolResult] = []
         remaining = list(calls)
         while remaining:
-            # 本层：依赖都已完成的
             layer = [c for c in remaining if all(d in done_ids for d in c.depends_on)]
             if not layer:
-                # 有环：剩余的强制执行（防死锁）
-                layer = remaining
-            layer_results = self._parallel(layer, timeout,
-                                           cancel_event=cancel_event, user_id=user_id, sink=sink)
-            results.extend(layer_results)
+                layer = remaining        # 有环：剩余的强制执行（防死锁）
+            yield from self._parallel(layer, timeout,
+                                      cancel_event=cancel_event, user_id=user_id, sink=sink)
             done_ids.update(c.call_id for c in layer)
             remaining = [c for c in remaining if c.call_id not in done_ids]
-        return results

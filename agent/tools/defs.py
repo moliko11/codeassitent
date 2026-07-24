@@ -16,7 +16,8 @@ class ToolSpec:
     meta: dict[str, Any] = field(default_factory=dict)
     fallback_tool_name: str | None = None # 失败时 fallback 到另一个工具（如：调用模型失败时 fallback 到本地工具）
     idempotent: bool = False # 是否幂等（同一 call_id 重复调用不会有副作用），用于幂等去重缓存
-
+    mutates_external: bool = False   # 是否修改外部状态(文件/DB)；True 时 需要谨慎
+    
 @dataclass
 class Tool:
     """工具定义：包含执行逻辑"""
