@@ -20,54 +20,24 @@ from .core.messages import Message
 from .runtime import RuntimeContext
 from .tools.registry import ToolExecutor, ToolRegistry
 from .streaming.events import RunStart, StepStart, StepEnd, RunEnd
+# agentloop.py -- import 区加一行
+from .persist.persister import Persister
 
-def agentloop(
-    user_input: str,
-    context: RuntimeContext,
-) -> AgentState:
-    """
-    运行 Agent 主循环（流式版）。
 
-    流程：
-    1. 接收用户输入，封装成初始 Message。
-    2. 从 ToolRegistry 导出可用工具的 ToolSpec。
-    3. 进入最多 max_steps 轮 Agent 循环：
-       - 流式调用 LLM（stream_llm）：逐 token 文本与工具参数增量实时推给 sink；
-       - 若模型无 tool_calls -> 最终回答，结束；
-       - 若返回 tool_calls -> 执行工具（ToolStart/ToolEnd 进度也推给 sink），结果回填，下一轮。
-    4. 超过 max_steps 仍未结束，标记 max_steps_exceeded。
 
-    sink（context.sink）是流式事件汇入点；默认 NullSink，对编程式调用/测试透明。
-    """
-    config = context.config or AgentConfig()
-    state = context.state or AgentState(max_steps=config.max_steps)
+def _run_steps(state: AgentState, context: RuntimeContext, persister):
+    """Agent 主循环体（共享给 agentloop 正常 run 与 continue_loop 续跑）。
+    假设 state.messages 已初始化（正常 run 由 agentloop 初始化；resume 由 resume() 重建）。"""
+    config = context.config
     sink = context.sink
     loop_detector = LoopDetector(threshold=config.soft_stop_threshold)
+    tools = [tool.tool_spec for tool in context.registry.list_tools()]
 
-    sink.emit(RunStart(run_id=state.run_id))
-
-    # 1. 初始化对话消息（system prompt 放第一条，定义 Agent 的行为契约）
-    state.messages = []
-    if config.system_prompt:
-        state.messages.append(
-            Message(role="system", content=config.system_prompt)
-        )
-    state.messages.append(Message(role="user", content=user_input))
-
-    # 2. 从 registry 导出工具定义
-    # 这里假设每个 Tool 内部都有 tool_spec 字段
-    tools = [
-        tool.tool_spec
-        for tool in context.registry.list_tools()
-    ]
-
-    # 3. 多轮 Agent Loop
     while state.should_continue():
         step = state.new_step()
         sink.emit(StepStart(step_index=step.index))
+        step.deadline = time.perf_counter() + config.step_timeout
 
-        step.deadline = time.perf_counter() + config.step_timeout  # 记录本轮执行截止时间
-        # 4. 构造本轮模型请求
         try:
             model_request = ModelRequest(
                 messages=state.messages,
@@ -77,72 +47,60 @@ def agentloop(
                 max_tokens=context.config.max_tokens,
             )
             step.model_request = model_request
-            # 5. 流式调用模型：边收边把增量事件推给 sink，返回累积好的 ModelResponse。
-            #    文本 token 与工具参数增量此时已实时呈现给用户。
-            #    异常（超时/认证/限流）原样抛出，交由下面的 classify_error 处理。
             model_response = context.model_adapter.stream_llm(model_request, sink)
             step.model_response = model_response
 
-            # 6. 如果模型没有请求工具调用，说明已经得到最终回答
+            # durability-first：先落盘（decide 前，FINISH/tool_call 两路都保住付费 LLM 回复）
+            if persister:
+                persister.log_assistant(model_response)
+
             action = decide(model_response)
             if action == Action.FINISH:
-                state.complete(model_response)
+                state.complete(model_response)   # 最终回答进 final_response，不进 messages（守 Decision 3）
                 step.finish()
                 sink.emit(StepEnd(step_index=step.index))
-                sink.emit(RunEnd(status="completed", final_text=model_response.text))
                 return state
             if action == Action.HANDLE_ERROR:
-                raise ValueError("模型返回既无文本也无工具调用")  # 走下面的错误回填
+                raise ValueError("模型返回既无文本也无工具调用")
 
-            # 7. 执行当前轮模型返回的所有工具调用
-            # action == CALL_TOOLS：executor 边执行边发 ToolStart/ToolEnd（每个包 timeout）
-            state.transition("waiting_tool")  # 进入等待工具执行状态
-            tool_results = context.tool_executor.execute_many(
+            # CALL_TOOLS：先 append_assistant（解耦：assistant 单独 append，同 CC）
+            state.messages = context.model_adapter.append_assistant(state.messages, model_response)
+            state.transition("waiting_tool")
+
+            # 逐 result 增量：durability-first（log-then-append），按完成序 yield
+            tool_results = []
+            for r in context.tool_executor.execute_many(
                 model_response.tool_calls, timeout=config.step_timeout, sink=sink
-            )
-
-            # 8. 将本轮 assistant tool_calls 和 tool_results 回填到 messages
-            # 注意：具体怎么组织 OpenAI / Claude / DeepSeek 的消息格式，
-            # 应该交给 model_adapter.append_tool_results 处理
-            state.messages = context.model_adapter.append_tool_results(
-                messages=state.messages,
-                model_response=model_response,
-                tool_results=tool_results,
-            )
-
-            # 工具调用摘要写入 tool_history（只存 call_id/ok/error_type，防状态膨胀；完整轨迹在 steps）
-            for r in tool_results:
+            ):
+                if persister:
+                    persister.log_tool_result(r)
+                state.messages = context.model_adapter.append_tool_result(state.messages, r)
+                step.tool_results.append(r)      # 对称：live 也填 step.tool_results（与 replay 一致）
                 state.tool_history.append(ToolHistoryEntry(
-                    call_id=r.call_id,
-                    tool_name=r.tool_name,
-                    ok=r.ok,
-                    error_type=r.error.get("type") if r.error else None,
-                ))
+                    call_id=r.call_id, tool_name=r.tool_name, ok=r.ok,
+                    error_type=r.error.get("type") if r.error else None))
+                tool_results.append(r)
 
-            state.transition("running")  # 工具执行完毕，回到 running 状态
+            state.transition("running")
 
-            # 失败兜底 成功循环检测
+            # 失败兜底 / 循环检测（收完本轮所有 result 再判）
             if any(not r.ok for r in tool_results):
-                state.record_error()  # 记录本轮工具调用失败，连续失败计数加1
+                state.record_error()
                 if state.consecutive_tool_failures >= config.max_consecutive_tool_failures:
                     state.fail({"type": "ToolFailure",
                                 "message": f"连续工具调用失败次数{state.consecutive_tool_failures}超过阈值{config.max_consecutive_tool_failures}"})
                     sink.emit(StepEnd(step_index=step.index))
-                    sink.emit(RunEnd(status="failed", error=state.error))
                     return state
             else:
-                state.reset_error()  # 本轮工具调用成功，连续失败计数清零
-
+                state.reset_error()
                 loop_detector.observe(model_response.tool_calls)
-
                 if loop_detector.is_looping():
                     state.messages.append(Message(
                         role="user",
                         content=SOFT_STOP_HINT.format(step=step.index, tool=tool_results[0].tool_name),
                     ))
-                    loop_detector.reset()  # 重置循环检测器，避免重复注入软终止提示
+                    loop_detector.reset()
 
-            # 本轮正常结束，进入下一轮
             sink.emit(StepEnd(step_index=step.index))
 
         except Exception as e:
@@ -151,36 +109,94 @@ def agentloop(
             step.finish()
             sink.emit(StepEnd(step_index=step.index))
 
-            # 不可重试（认证/参数/配置）：重试必失败，直接 fail，不回填模型、不浪费步数
             if not error["retryable"]:
                 state.fail(error)
-                sink.emit(RunEnd(status="failed", error=error))
                 return state
-
-            # 可重试：回填给模型当 observation，让模型调整；连续失败超阈值才 fail
             state.record_error()
             if state.consecutive_tool_failures >= config.max_consecutive_tool_failures:
                 state.fail(error)
-                sink.emit(RunEnd(status="failed", error=error))
                 return state
-            state.messages.append(
-                Message(
-                    role="user",
-                    content=f"[系统提示] 上一步执行失败：{error['type']}: {error['message']}。"
-                            f"请根据错误信息调整下一步，或直接给出最终答案。",
-                )
-            )
+            state.messages.append(Message(
+                role="user",
+                content=f"[系统提示] 上一步执行失败：{error['type']}: {error['message']}。"
+                        f"请根据错误信息调整下一步，或直接给出最终答案。",
+            ))
             # 可重试且未超阈值：继续下一轮（StepEnd 已发）
 
     if not state.is_terminal():
-        # Agent 循环超过最大步数，标记为失败
         state.exceed_max_steps()
-
-    sink.emit(RunEnd(status=state.status, error=state.error))
     return state
+def _end_run(state: AgentState, sink, persister):
+    """统一收尾：发 RunEnd（final_text 从 final_response 取）+ log_run_end + close。"""
+    final_text = None
+    if state.final_response is not None:
+        final_text = getattr(state.final_response, "text", None)
+    sink.emit(RunEnd(status=state.status, error=state.error, final_text=final_text))
+    if persister:
+        persister.log_run_end(state.status, state.error)
+        persister.close()
+
+def _execute_pending(state: AgentState, context: RuntimeContext, persister):
+    """resume 后执行 pending_tool_calls（崩在执行中的工具，per-call_id）。
+    用录好的 tool_calls，不调 LLM；结果归到末尾 step（同一轮 assistant 的工具）。"""
+    config = context.config
+    sink = context.sink
+    pending = state.pending_tool_calls
+    state.pending_tool_calls = []
+    if not pending:
+        return
+    step = state.steps[-1] if state.steps else state.new_step()
+    if state.status != "running":
+        state.transition("running")        # created -> running（resume 后可能仍是 created）
+    state.transition("waiting_tool")
+    for r in context.tool_executor.execute_many(pending, timeout=config.step_timeout, sink=sink):
+        if persister:
+            persister.log_tool_result(r)
+        state.messages = context.model_adapter.append_tool_result(state.messages, r)
+        step.tool_results.append(r)
+        state.tool_history.append(ToolHistoryEntry(
+            call_id=r.call_id, tool_name=r.tool_name, ok=r.ok,
+            error_type=r.error.get("type") if r.error else None))
+    state.transition("running")
+
+
+def continue_loop(state: AgentState, context: RuntimeContext) -> AgentState:
+    """resume 续跑：state.messages 已由 resume() 重建，跳过初始化。
+    先执行 pending（崩在工具执行中），再进主循环。Persister 以 append 模式复用同一 transcript。"""
+    sink = context.sink
+    persister = Persister(state.run_id) if context.persist else None
+    sink.emit(RunStart(run_id=state.run_id))
+    _execute_pending(state, context, persister)
+    state = _run_steps(state, context, persister)
+    _end_run(state, sink, persister)
+    return state
+
+def agentloop(user_input: str, context: RuntimeContext) -> AgentState:
+    """运行 Agent 主循环（流式版 + 可选消息级落盘）。"""
+    config = context.config or AgentConfig()
+    state = context.state or AgentState(max_steps=config.max_steps)
+    sink = context.sink
+    persister = Persister(state.run_id) if context.persist else None
+
+    sink.emit(RunStart(run_id=state.run_id))
+
+    # 1. 初始化对话消息：首轮(system+user)；续轮(只 append user，保留跨轮上下文)
+    #    判据：state.messages 是否为空--空=首轮，非空=续轮(已有跨轮历史)
+    if not state.messages and config.system_prompt:
+        state.messages.append(Message(role="system", content=config.system_prompt))
+    state.messages.append(Message(role="user", content=user_input))
+    if persister:
+        persister.log_user(user_input)     # durability-first：先落盘再改内存
+
+    # 2. 主循环（抽到 _run_steps，与 continue_loop 共享）
+    state = _run_steps(state, context, persister)
+    _end_run(state, sink, persister)
+    return state
+
 
 def run_agent_loop(registry: ToolRegistry, model_adapter: BaseModelAdapter, tool_executor: ToolExecutor, config: Optional[AgentConfig] = None):
     import sys
+    import uuid
     from .streaming.printer import StreamingPrinter
     # Windows 默认 stdout 可能是 GBK，无法编码 ⏺/⎿ 等符号；切到 UTF-8（VS Code 终端原生支持）。
     # 失败也不影响（printer 内部还有 encode 兜底）。
@@ -189,21 +205,28 @@ def run_agent_loop(registry: ToolRegistry, model_adapter: BaseModelAdapter, tool
     except Exception:
         pass
     printer = StreamingPrinter()
+    session_id = str(uuid.uuid4())   # 一个 REPL session（跨多轮稳定，串联同一 session 的多个 run）
+    messages: list = []               # 跨轮累积上下文（内存共享 list）
     while True:
         user_input = input("User: ")
         if user_input.lower() in ["exit", "quit"]:
             print("Exiting agent loop.")
             break
+        state = AgentState()
+        state.session_id = session_id
+        state.messages = messages     # 继承跨轮上下文（首轮空，agentloop 加 system）
         context = RuntimeContext(
             registry=registry,
             model_adapter=model_adapter,
             tool_executor=tool_executor,
             config=config or AgentConfig(),
-            state=AgentState(),
+            state=state,
             sink=printer,
+            persist=True
         )
         # 文本/工具进度已在运行中由 StreamingPrinter 实时流式打印，
         # 这里不再事后 print（避免重复输出）。
+        # agentloop 往 state.messages append 了 assistant/tool；messages 是同一引用 -> 跨轮自动累积
         agentloop(user_input, context)
 
 def main():

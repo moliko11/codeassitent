@@ -17,3 +17,4 @@ class RuntimeContext:
     config: AgentConfig
     state: AgentState
     sink: EventSink = field(default_factory=NullSink)
+    persist: bool = False   # 阶段 5：True 时 agentloop 建 Persister 落盘 transcript
