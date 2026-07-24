@@ -47,14 +47,43 @@ class BaseModelAdapter(ABC):
         sink.emit(MessageEnd(stop_reason=resp.stop_reason, usage=resp.usage))
         return resp
 
+
+
     @abstractmethod
+    def append_assistant(
+        self, messages: list[Message], model_response: ModelResponse
+    ) -> list[Message]:
+        """按 provider 格式把 assistant 消息（含 tool_calls）追加到 messages。
+        解耦（硬伤 3）：assistant 单独 append，不再 deferred 到 results。
+        无 tool_calls 时返回原 messages（最终回答不进 messages，由调用方控制）。"""
+    
+    @abstractmethod
+    def append_tool_result(
+        self, messages: list[Message], result: ToolResult
+    ) -> list[Message]:
+        """按 provider 格式把单条 tool 结果追加到 messages。逐 result 增量（硬伤 1，非批量）。"""
+
+
+    # @abstractmethod
+    # def append_tool_results(
+    #     self,
+    #     messages: list[Message],
+    #     model_response: ModelResponse,
+    #     tool_results: list[ToolResult],
+    # ) -> list[Message]:
+    #     """按 provider 格式把 tool 结果回填到 messages（各 provider 格式不同，必须各自实现）"""
     def append_tool_results(
         self,
         messages: list[Message],
         model_response: ModelResponse,
         tool_results: list[ToolResult],
     ) -> list[Message]:
-        """按 provider 格式把 tool 结果回填到 messages（各 provider 格式不同，必须各自实现）"""
+        """兼容旧接口 = append_assistant + 逐条 append_tool_result。
+        agentloop 改造后不再调本方法，保留给其他调用方/测试。"""
+        new_messages = self.append_assistant(messages, model_response)
+        for r in tool_results:
+            new_messages = self.append_tool_result(new_messages, r)
+        return new_messages
 
     def _tool_result_to_text(self, result: ToolResult) -> str:
         """把 ToolResult 转成文本（通用实现，子类可覆盖）"""

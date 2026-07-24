@@ -232,58 +232,45 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
             meta={"provider": "openai_compatible"},
         )
 
-    def append_tool_results(
-        self,
-        messages: list[Message],
-        model_response: ModelResponse,
-        tool_results: list[ToolResult],
+    def append_assistant(
+        self, messages: list[Message], model_response: ModelResponse
     ) -> list[Message]:
-        """回填 assistant tool_calls 消息 + 各工具结果。
-
-        Chat Completions 要求：tool 结果消息之前必须有一条发起 tool_calls
-        的 assistant 消息，且每条 tool 结果要带匹配的 tool_call_id。
-        """
+        """追加带 tool_calls 的 assistant 消息（Chat Completions 格式）。
+        无 tool_calls 返回原 messages（最终回答不进 messages，由调用方控制）。"""
+        if not model_response.tool_calls:
+            return messages
         new_messages = list(messages)
+        tool_calls = []
+        for tc in model_response.tool_calls:
+            args = tc.arguments
+            if isinstance(args, dict):
+                args = json.dumps(args, ensure_ascii=False)
+            tool_calls.append({
+                "id": tc.call_id,
+                "type": "function",
+                "function": {"name": tc.tool_name, "arguments": args or "{}"},
+            })
+        new_messages.append(Message(
+            role="assistant",
+            content={
+                "role": "assistant",
+                "content": model_response.text or None,
+                "tool_calls": tool_calls,
+            },
+        ))
+        return new_messages
 
-        # 1) 追加带 tool_calls 的 assistant 消息
-        if model_response.tool_calls:
-            tool_calls = []
-            for tc in model_response.tool_calls:
-                args = tc.arguments
-                if isinstance(args, dict):
-                    args = json.dumps(args, ensure_ascii=False)
-                tool_calls.append(
-                    {
-                        "id": tc.call_id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.tool_name,
-                            "arguments": args or "{}",
-                        },
-                    }
-                )
-            new_messages.append(
-                Message(
-                    role="assistant",
-                    content={
-                        "role": "assistant",
-                        "content": model_response.text or None,
-                        "tool_calls": tool_calls,
-                    },
-                )
-            )
-
-        # 2) 追加每个工具结果（role=tool，需带 tool_call_id）
-        for result in tool_results:
-            new_messages.append(
-                Message(
-                    role="tool",
-                    content={
-                        "role": "tool",
-                        "tool_call_id": result.call_id,
-                        "content": self._tool_result_to_text(result),
-                    },
-                )
-            )
-
+    def append_tool_result(
+        self, messages: list[Message], result: ToolResult
+    ) -> list[Message]:
+        """追加单条 tool 结果（role=tool，带 tool_call_id）。"""
+        new_messages = list(messages)
+        new_messages.append(Message(
+            role="tool",
+            content={
+                "role": "tool",
+                "tool_call_id": result.call_id,
+                "content": self._tool_result_to_text(result),
+            },
+        ))
         return new_messages

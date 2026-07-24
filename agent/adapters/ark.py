@@ -80,10 +80,10 @@ class ArkAdapter(BaseModelAdapter):
 
         text_parts: list[str] = []
         tool_acc: dict[str, dict[str, Any]] = {}  # item_id -> {call_id, name, args}
-        ended_ids: set[str] = set()
-        usage: TokenUsage | None = None
-        stop_reason: str | None = None
-        response_id: str | None = None
+        ended_ids: set[str] = set() # 记录已收到 done 的 item_id，避免重复发 ToolCallEnd
+        usage: TokenUsage | None = None # 
+        stop_reason: str | None = None #
+        response_id: str | None = None #
 
         for event in stream:
             etype = getattr(event, "type", "")
@@ -264,48 +264,39 @@ class ArkAdapter(BaseModelAdapter):
             meta={"provider": "ark"},
         )
 
-    def append_tool_results(
-        self,
-        messages: list[Message],
-        model_response: ModelResponse,
-        tool_results: list[ToolResult],
+    def append_assistant(
+        self, messages: list[Message], model_response: ModelResponse
     ) -> list[Message]:
-        """回填 assistant 的 function_call + 各工具结果。
-
-        Responses API：function_call 与 function_call_output 都是 input 数组里的项，
-        不需要 role:tool 消息。这里用 Message 包装，content 存 dict，_to_input 原样透传。
-        """
+        """追加 function_call 项（Responses API 格式）。无 tool_calls 返回原 messages。"""
+        if not model_response.tool_calls:
+            return messages
         new_messages = list(messages)
+        for tc in model_response.tool_calls:
+            args = tc.arguments
+            if isinstance(args, dict):
+                args = json.dumps(args, ensure_ascii=False)
+            new_messages.append(Message(
+                role="assistant",
+                content={
+                    "type": "function_call",
+                    "call_id": tc.call_id,
+                    "name": tc.tool_name,
+                    "arguments": args or "{}",
+                },
+            ))
+        return new_messages
 
-        # 1) 追加每个 function_call 项（assistant 发起的工具调用）
-        if model_response.tool_calls:
-            for tc in model_response.tool_calls:
-                args = tc.arguments
-                if isinstance(args, dict):
-                    args = json.dumps(args, ensure_ascii=False)
-                new_messages.append(
-                    Message(
-                        role="assistant",
-                        content={
-                            "type": "function_call",
-                            "call_id": tc.call_id,
-                            "name": tc.tool_name,
-                            "arguments": args or "{}",
-                        },
-                    )
-                )
-
-        # 2) 追加每个工具结果（function_call_output）
-        for result in tool_results:
-            new_messages.append(
-                Message(
-                    role="user",
-                    content={
-                        "type": "function_call_output",
-                        "call_id": result.call_id,
-                        "output": self._tool_result_to_text(result),
-                    },
-                )
-            )
-
+    def append_tool_result(
+        self, messages: list[Message], result: ToolResult
+    ) -> list[Message]:
+        """追加单条 function_call_output。"""
+        new_messages = list(messages)
+        new_messages.append(Message(
+            role="user",
+            content={
+                "type": "function_call_output",
+                "call_id": result.call_id,
+                "output": self._tool_result_to_text(result),
+            },
+        ))
         return new_messages
