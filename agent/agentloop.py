@@ -56,7 +56,10 @@ def _run_steps(state: AgentState, context: RuntimeContext, persister):
 
             action = decide(model_response)
             if action == Action.FINISH:
-                state.complete(model_response)   # 最终回答进 final_response，不进 messages（守 Decision 3）
+                # final 也进 messages 作历史（推翻 Decision 3：多轮对话需要上一轮最终回复作上下文，
+                # 否则下一轮 model 看不到、重复回答）。final_response 仍设，给 _emit_run_end 取 final_text。
+                state.messages = context.model_adapter.append_assistant(state.messages, model_response)
+                state.complete(model_response)
                 step.finish()
                 sink.emit(StepEnd(step_index=step.index))
                 return state
@@ -126,12 +129,30 @@ def _run_steps(state: AgentState, context: RuntimeContext, persister):
     if not state.is_terminal():
         state.exceed_max_steps()
     return state
-def _end_run(state: AgentState, sink, persister):
-    """统一收尾：发 RunEnd（final_text 从 final_response 取）+ log_run_end + close。"""
+def _run_turn(user_input: str, state: AgentState, context: RuntimeContext, persister):
+    """单轮体（agentloop 与 REPL 复用）：初始化 messages + log_user + _run_steps。
+    不发 RunEnd、不收尾 persister——收尾由调用方负责（agentloop 走 _end_run；REPL 走 session 级收尾）。"""
+    config = context.config
+    # 1. 初始化对话消息：首轮(system+user)；续轮(只 append user，保留跨轮上下文)
+    #    判据：state.messages 是否为空——空=首轮，非空=续轮(已有跨轮历史)
+    if not state.messages and config.system_prompt:
+        state.messages.append(Message(role="system", content=config.system_prompt))
+    state.messages.append(Message(role="user", content=user_input))
+    if persister:
+        persister.log_user(user_input)     # durability-first：先落盘再改内存
+    # 2. 主循环（抽到 _run_steps，与 continue_loop 共享）
+    return _run_steps(state, context, persister)
+
+def _emit_run_end(state: AgentState, sink):
+    """发 RunEnd 流式事件（UI 用）。final_text 从 final_response 取。"""
     final_text = None
     if state.final_response is not None:
         final_text = getattr(state.final_response, "text", None)
     sink.emit(RunEnd(status=state.status, error=state.error, final_text=final_text))
+
+def _end_run(state: AgentState, sink, persister):
+    """单次调用收尾：发 RunEnd + log_run_end + close（agentloop / continue_loop 复用）。"""
+    _emit_run_end(state, sink)
     if persister:
         persister.log_run_end(state.status, state.error)
         persister.close()
@@ -166,30 +187,24 @@ def continue_loop(state: AgentState, context: RuntimeContext) -> AgentState:
     sink = context.sink
     persister = Persister(state.run_id) if context.persist else None
     sink.emit(RunStart(run_id=state.run_id))
+    # 续跑重置步数计数：max_steps 是单轮上限，重放出的历史 steps 不该吃掉续跑预算。
+    # steps 保留为历史轨迹（审计/重放），step_index 仅控制"还能跑几步"。
+    state.step_index = 0
     _execute_pending(state, context, persister)
     state = _run_steps(state, context, persister)
     _end_run(state, sink, persister)
     return state
 
 def agentloop(user_input: str, context: RuntimeContext) -> AgentState:
-    """运行 Agent 主循环（流式版 + 可选消息级落盘）。"""
+    """运行 Agent 主循环（流式版 + 可选消息级落盘）。单次调用自洽：
+    自建 Persister、结束写 run_end + close。REPL 多轮复用走 _run_turn，不经过这里。"""
     config = context.config or AgentConfig()
     state = context.state or AgentState(max_steps=config.max_steps)
     sink = context.sink
     persister = Persister(state.run_id) if context.persist else None
 
     sink.emit(RunStart(run_id=state.run_id))
-
-    # 1. 初始化对话消息：首轮(system+user)；续轮(只 append user，保留跨轮上下文)
-    #    判据：state.messages 是否为空--空=首轮，非空=续轮(已有跨轮历史)
-    if not state.messages and config.system_prompt:
-        state.messages.append(Message(role="system", content=config.system_prompt))
-    state.messages.append(Message(role="user", content=user_input))
-    if persister:
-        persister.log_user(user_input)     # durability-first：先落盘再改内存
-
-    # 2. 主循环（抽到 _run_steps，与 continue_loop 共享）
-    state = _run_steps(state, context, persister)
+    state = _run_turn(user_input, state, context, persister)
     _end_run(state, sink, persister)
     return state
 
@@ -205,29 +220,46 @@ def run_agent_loop(registry: ToolRegistry, model_adapter: BaseModelAdapter, tool
     except Exception:
         pass
     printer = StreamingPrinter()
-    session_id = str(uuid.uuid4())   # 一个 REPL session（跨多轮稳定，串联同一 session 的多个 run）
+    config = config or AgentConfig()
+    # 会话级单 run_id（对齐 CC）：整个 REPL session 共用一个 transcript.jsonl，跨轮 append；
+    # 退出时才写 run_end。崩在中途无 run_end -> resume 按最后状态续跑（durability-first 的保证）。
+    session_run_id = str(uuid.uuid4())
     messages: list = []               # 跨轮累积上下文（内存共享 list）
-    while True:
-        user_input = input("User: ")
-        if user_input.lower() in ["exit", "quit"]:
-            print("Exiting agent loop.")
-            break
-        state = AgentState()
-        state.session_id = session_id
-        state.messages = messages     # 继承跨轮上下文（首轮空，agentloop 加 system）
-        context = RuntimeContext(
-            registry=registry,
-            model_adapter=model_adapter,
-            tool_executor=tool_executor,
-            config=config or AgentConfig(),
-            state=state,
-            sink=printer,
-            persist=True
-        )
-        # 文本/工具进度已在运行中由 StreamingPrinter 实时流式打印，
-        # 这里不再事后 print（避免重复输出）。
-        # agentloop 往 state.messages append 了 assistant/tool；messages 是同一引用 -> 跨轮自动累积
-        agentloop(user_input, context)
+    persister = Persister(session_run_id)
+    last_state = None
+    try:
+        while True:
+            user_input = input("User: ")
+            if user_input.lower() in ["exit", "quit"]:
+                print("Exiting agent loop.")
+                break
+            # 每轮新 state（step_index 从 0，max_steps 是单轮上限），但共用 run_id + messages
+            state = AgentState(run_id=session_run_id, max_steps=config.max_steps)
+            state.session_id = session_run_id
+            state.messages = messages     # 继承跨轮上下文（首轮空，_run_turn 加 system）
+            context = RuntimeContext(
+                registry=registry,
+                model_adapter=model_adapter,
+                tool_executor=tool_executor,
+                config=config,
+                state=state,
+                sink=printer,
+                persist=True,
+            )
+            # 文本/工具进度已在运行中由 StreamingPrinter 实时流式打印。
+            # _run_turn 往 state.messages append user(in-place)；但 append_assistant/tool_result 返回
+            # 新 list(copy)，state.messages 会离开共享 messages 对象，故每轮结束用 messages = state.messages
+            # 同步（见下），否则下一轮丢失上一轮 assistant + tool_result（bug2）。
+            printer.emit(RunStart(run_id=session_run_id))
+            state = _run_turn(user_input, state, context, persister)
+            _emit_run_end(state, printer)   # 每轮 UI 结束提示；不 log_run_end（session 级，退出时才写）
+            messages = state.messages   # 同步共享 list（append 返回 copy，state.messages 已离开原对象）
+            last_state = state
+        # session 正常退出：写 run_end（用最后一轮 status）；崩在 finally 前则不写 -> resume 续跑
+        if last_state is not None:
+            persister.log_run_end(last_state.status, last_state.error)
+    finally:
+        persister.close()
 
 def main():
     # 用 tools 子包的默认 registry：@tool 装饰器把 getnowtime 注册到了那里

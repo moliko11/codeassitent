@@ -26,13 +26,13 @@ def apply_message(state: AgentState, rec: dict, adapter: BaseModelAdapter):
                 tool_calls=[ToolCall(**c) for c in rec["tool_calls"]],
             )
             step.model_response = mr
-            # 解耦（硬伤 3）：assistant 单独 append
-            #  - 有 tool_calls -> append_assistant 进 messages（同 live CALL_TOOLS 分支）
-            #  - 无 tool_calls = 最终回答 -> state.complete 进 final_response，不进 messages（同 live FINISH）
-            if mr.tool_calls:
-                state.messages = adapter.append_assistant(state.messages, mr)
-            else:
-                state.complete(mr)
+            # 解耦（硬伤 3）：assistant 单独 append。有 tool_calls / 无 tool_calls（final）都进 messages
+            # 作历史（推翻 Decision 3：多轮对话需要上一轮 final 作上下文）。
+            # final（无 tool_calls）不设终态：多轮 session 中间轮 final 不是 session 终态，
+            # 终态统一由 run_end 记录决定（崩场景无 run_end -> 非终态可续跑）。
+            state.messages = adapter.append_assistant(state.messages, mr)
+            if not mr.tool_calls:
+                state.final_response = mr
 
         elif t == "tool_result":                          # 逐 result 增量记录（硬伤 1，非批量）
             r = ToolResult(**rec["result"])

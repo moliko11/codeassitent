@@ -6,7 +6,7 @@ from typing import Any, Optional
 import time
 import uuid
 
-
+ 
 def _ser(obj: Any) -> Any:
     """递归序列化为可 JSON 化的纯结构：dataclass -> dict(跳过 raw)，
     list/dict 递归，其他原样。产出可直接 json.dumps。
@@ -215,7 +215,10 @@ class AgentState:
 
     def new_step(self) -> AgentStep:
         """创建一个新的Agent循环轮次"""
-        step = AgentStep(index=self.step_index)
+        # index 用 len(steps) 而非 step_index：resume 续跑会重置 step_index=0（max_steps 是单轮上限，
+        # 不能让历史轮次吃掉续跑预算），重置后若仍用 step_index 会与历史 step 的 index 重复；
+        # 用 len(steps) 则 live/重放/续跑都连续无冲突（live 时 len(steps)==step_index，等价）。
+        step = AgentStep(index=len(self.steps))
         self.steps.append(step)
         self.step_index += 1
         # running 是循环稳态：首轮 created->running、异常恢复后 waiting_tool->running 才需转换；
