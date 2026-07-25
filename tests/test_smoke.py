@@ -23,6 +23,7 @@ from agent.tools.registry import ToolRegistry, ToolExecutor
 from agent.tools.defs import ToolCall
 from agent.core.models import ModelResponse
 from agent.adapters.base import BaseModelAdapter
+from agent.core.messages import Message
 
 
 class _ScriptedAdapter(BaseModelAdapter):
@@ -53,10 +54,15 @@ class _ScriptedAdapter(BaseModelAdapter):
         return ModelResponse(text="done")
 
     def append_assistant(self, messages, model_response):
-        return messages  # 测试不关心 provider 回填格式
+        # 模拟真实 provider：copy + append（返回新 list），让多轮 messages 累积可测
+        new_messages = list(messages)
+        new_messages.append(Message(role="assistant", content=model_response.text or ""))
+        return new_messages
 
     def append_tool_result(self, messages, result):
-        return messages  # 测试不关心 provider 回填格式
+        new_messages = list(messages)
+        new_messages.append(Message(role="tool", content=result.text or ""))
+        return new_messages
 
     def append_tool_results(self, messages, model_response, tool_results):
         return messages  # 兼容旧接口（基类已有默认实现，此处保留原行为）
