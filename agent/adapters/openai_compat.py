@@ -235,29 +235,35 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
     def append_assistant(
         self, messages: list[Message], model_response: ModelResponse
     ) -> list[Message]:
-        """追加带 tool_calls 的 assistant 消息（Chat Completions 格式）。
-        无 tool_calls 返回原 messages（最终回答不进 messages，由调用方控制）。"""
-        if not model_response.tool_calls:
-            return messages
+        """追加 assistant 消息（Chat Completions 格式）。
+        有 tool_calls -> 带 tool_calls 的 assistant；无 tool_calls -> 纯 text assistant
+        （最终回答也进 messages 作历史，推翻 Decision 3：多轮需要上一轮 final 作上下文）。"""
         new_messages = list(messages)
-        tool_calls = []
-        for tc in model_response.tool_calls:
-            args = tc.arguments
-            if isinstance(args, dict):
-                args = json.dumps(args, ensure_ascii=False)
-            tool_calls.append({
-                "id": tc.call_id,
-                "type": "function",
-                "function": {"name": tc.tool_name, "arguments": args or "{}"},
-            })
-        new_messages.append(Message(
-            role="assistant",
-            content={
-                "role": "assistant",
-                "content": model_response.text or None,
-                "tool_calls": tool_calls,
-            },
-        ))
+        if model_response.tool_calls:
+            tool_calls = []
+            for tc in model_response.tool_calls:
+                args = tc.arguments
+                if isinstance(args, dict):
+                    args = json.dumps(args, ensure_ascii=False)
+                tool_calls.append({
+                    "id": tc.call_id,
+                    "type": "function",
+                    "function": {"name": tc.tool_name, "arguments": args or "{}"},
+                })
+            new_messages.append(Message(
+                role="assistant",
+                content={
+                    "role": "assistant",
+                    "content": model_response.text or None,
+                    "tool_calls": tool_calls,
+                },
+            ))
+        else:
+            # 最终回答：纯 text assistant（_to_chat_messages else 分支转 {role:assistant, content:text}）
+            new_messages.append(Message(
+                role="assistant",
+                content=model_response.text or "",
+            ))
         return new_messages
 
     def append_tool_result(

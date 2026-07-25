@@ -53,9 +53,10 @@ class BaseModelAdapter(ABC):
     def append_assistant(
         self, messages: list[Message], model_response: ModelResponse
     ) -> list[Message]:
-        """按 provider 格式把 assistant 消息（含 tool_calls）追加到 messages。
+        """按 provider 格式把 assistant 消息追加到 messages。
         解耦（硬伤 3）：assistant 单独 append，不再 deferred 到 results。
-        无 tool_calls 时返回原 messages（最终回答不进 messages，由调用方控制）。"""
+        有 tool_calls -> 带 tool_calls 的 assistant；无 tool_calls -> 纯 text assistant
+        （最终回答也进 messages 作历史，多轮对话需要上一轮 final 作上下文，推翻 Decision 3）。"""
     
     @abstractmethod
     def append_tool_result(

@@ -267,10 +267,18 @@ class ArkAdapter(BaseModelAdapter):
     def append_assistant(
         self, messages: list[Message], model_response: ModelResponse
     ) -> list[Message]:
-        """追加 function_call 项（Responses API 格式）。无 tool_calls 返回原 messages。"""
-        if not model_response.tool_calls:
-            return messages
+        """追加 assistant 消息（Responses API 格式）。
+        text（无论是否带 tool_calls）-> message 项；有 tool_calls 再追加 function_call 项。
+        最终回答也进 messages 作历史（推翻 Decision 3）；带 tool_calls 时的 text 也进（bug3），
+        否则下一轮看不到 assistant 的说明文字。"""
         new_messages = list(messages)
+        # assistant 的 text 进 messages：_to_input else 分支转 {role:assistant, content:[{type:output_text}]}。
+        # 无 tool_calls 时 text 即最终回答（bug1）；有 tool_calls 时 text 是说明，也要让下一轮看到（bug3）。
+        if model_response.text:
+            new_messages.append(Message(
+                role="assistant",
+                content=model_response.text,
+            ))
         for tc in model_response.tool_calls:
             args = tc.arguments
             if isinstance(args, dict):
