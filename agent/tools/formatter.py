@@ -5,7 +5,7 @@ from .defs import ToolResult
 class ToolResultFormatter:
     """把 ToolResult 格式化成回填给模型的 text：结构化错误 + 成功结果压缩。"""
 
-    def __init__(self, strategy: str = "truncate", max_length: int = 2000):
+    def __init__(self, strategy: str = "none", max_length: int = 2000):  # 默认 none:不截断,大结果交给 ToolResultBudget 落盘(对齐 cc)
         self.strategy = strategy
         self.max_length = max_length
 
@@ -47,6 +47,8 @@ class ToolResultFormatter:
         return "工具执行失败，请换一种方法或基于已有信息作答。"
 
     def _compress(self, text: str) -> str:
+        if self.strategy == "none":
+            return text  # 不压缩:大结果交给 ToolResultBudget 落盘(对齐 cc,无损)
         if len(text) <= self.max_length:
             return text
         if self.strategy == "truncate":
