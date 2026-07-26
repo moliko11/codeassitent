@@ -10,10 +10,9 @@
 不依赖真实 LLM API。运行（从 code/ 目录，3.12 venv）：
     python -m pytest tests/test_smoke.py -v
 """
+
 import json
-
 import pytest
-
 from agent.agentloop import agentloop
 from agent.runtime import RuntimeContext
 from agent.config.config import AgentConfig

@@ -26,3 +26,4 @@ agent/供应商.txt
 
 # Agent 运行时持久化产物（transcript 等，不进版本库）
 persist/runs/
+persist/
