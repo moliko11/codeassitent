@@ -11,3 +11,20 @@ def run_dir(run_id: str) -> Path:
 def transcript_path(run_id: str) -> Path:
     # transcript.jsonl 直接落盘,不落内存
     return run_dir(run_id) / "transcript.jsonl"
+
+
+def tool_results_dir(run_id: str) -> Path:
+    """工具结果落盘子目录(步3 ToolResultBudget 用)。不 mkdir,由调用方按需建。"""
+    return run_dir(run_id) / "tool-results"
+
+def memory_dir() -> Path:
+    """长期记忆目录(步6 Memory 用,跨 run 共享,与 runs/ 平级)。会 mkdir。"""
+    d = PERSIST_ROOT.parent / "memory"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+def memory_dir() -> Path:
+    """长期记忆目录(步6 Memory 用,跨 run 共享,与 runs/ 平级)。会 mkdir。"""
+    d = PERSIST_ROOT.parent / "memory"
+    d.mkdir(parents=True, exist_ok=True)
+    return d

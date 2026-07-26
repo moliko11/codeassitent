@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+import sys
 import time
 from typing import Any, Optional
 
@@ -22,7 +23,8 @@ from .tools.registry import ToolExecutor, ToolRegistry
 from .streaming.events import RunStart, StepStart, StepEnd, RunEnd
 # agentloop.py -- import 区加一行
 from .persist.persister import Persister
-
+from .context.builder import ContextBuilder
+from .context.auto_compact import make_summarizer
 
 
 def _run_steps(state: AgentState, context: RuntimeContext, persister):
@@ -33,6 +35,14 @@ def _run_steps(state: AgentState, context: RuntimeContext, persister):
     loop_detector = LoopDetector(threshold=config.soft_stop_threshold)
     tools = [tool.tool_spec for tool in context.registry.list_tools()]
 
+     # 阶段 6：ContextBuilder(调 LLM 前组装 messages 的入口，对齐 cc query.ts:365 的管线入口)。
+    # context_builder 未注入时从 config 现场构造；超 budget 只 print 到 stderr 告警，不裁剪。
+    builder = context.context_builder or ContextBuilder(
+        context_budget=config.context_budget,
+        warn_sink=lambda m: print(m, file=sys.stderr),
+        summarizer=make_summarizer(context.model_adapter),  # 步5:超 budget 时摘要兜底
+    )
+
     while state.should_continue():
         step = state.new_step()
         sink.emit(StepStart(step_index=step.index))
@@ -40,7 +50,7 @@ def _run_steps(state: AgentState, context: RuntimeContext, persister):
 
         try:
             model_request = ModelRequest(
-                messages=state.messages,
+                messages=builder.build(state).messages,
                 tools=tools if context.config.enable_tools else [],
                 model=context.config.model,
                 temperature=context.config.temperature,

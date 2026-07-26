@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Optional
 
 from ..prompts import DEFAULT_SYSTEM_PROMPT
 
@@ -15,6 +16,7 @@ class AgentConfig:
     max_consecutive_tool_failures: int = 3 # 连续工具调用失败次数，超过则强制结束循环
     soft_stop_threshold: int = 3  # 连续重复调用相同工具+参数的次数，达此值注入软终止提醒（继续运行，不强制结束）
     step_timeout: float = 30.0  # 每轮 Agent 循环的超时时间（秒），超过则抛出 StepTimeout 异常
+    context_budget: Optional[int] = None  # 阶段 6：单次请求输入侧 token 预算(None=不限)。模型 window 减 max_tokens 再打折
 
 
 """
