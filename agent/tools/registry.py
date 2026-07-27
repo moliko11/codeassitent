@@ -52,14 +52,14 @@ registry = ToolRegistry()
 
 
 def tool(name, description, input_schema, examples=None, returns="",
-         idempotent=False, fallback_tool_name=None):
-        #  idempotent
+         idempotent=False, fallback_tool_name=None, mutates_external=False):
     def decorator(func):
         registry.register(Tool(
             tool_spec=ToolSpec(name=name, description=description,
                                input_schema=input_schema,
                                examples=examples or [], returns=returns,
-                               idempotent=idempotent, fallback_tool_name=fallback_tool_name),
+                               idempotent=idempotent, fallback_tool_name=fallback_tool_name,
+                               mutates_external=mutates_external),
             handler=func,
         ))
         return func

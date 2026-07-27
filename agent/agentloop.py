@@ -25,6 +25,33 @@ from .streaming.events import RunStart, StepStart, StepEnd, RunEnd
 from .persist.persister import Persister
 from .context.builder import ContextBuilder
 from .context.auto_compact import make_summarizer
+from .utils.fileHistory import FileHistory
+from .persist.paths import run_dir
+from .tools import _runtime_state
+
+
+def _track_edit_callback(call):
+    """ToolExecutor.before_mutation 回调:Edit/Write 写盘前调 file_history.track_edit 备份。
+
+    无 file_path 的工具(如 Bash)跳过--命令副作用不可追踪(对标 CC 边界,靠 git)。
+    file_history / current_step_id 由 _init_file_history / _run_steps 注入 _runtime_state。
+    """
+    fh = _runtime_state.file_history
+    if fh is None:
+        return
+    file_path = call.arguments.get("file_path")
+    if not file_path:
+        return
+    fh.track_edit(file_path, _runtime_state.current_step_id)
+
+
+def _init_file_history(run_id: str, persist: bool):
+    """按 run_id 初始化 file_history(备份根:persist/runs/<run_id>/file-history/)。
+    persist=False 不初始化(测试入口/非持久 run);测试可手动设 _runtime_state.file_history。"""
+    if not persist:
+        return
+    _runtime_state.reset()
+    _runtime_state.file_history = FileHistory(run_dir(run_id) / "file-history")
 
 
 def _run_steps(state: AgentState, context: RuntimeContext, persister):
@@ -41,10 +68,12 @@ def _run_steps(state: AgentState, context: RuntimeContext, persister):
         context_budget=config.context_budget,
         warn_sink=lambda m: print(m, file=sys.stderr),
         summarizer=make_summarizer(context.model_adapter),  # 步5:超 budget 时摘要兜底
+        memory_store=context.memory_store,                  # 步6:memory 分层注入
     )
 
     while state.should_continue():
         step = state.new_step()
+        _runtime_state.current_step_id = step.index   # before_mutation 回调读它做 track_edit 的 step_id
         sink.emit(StepStart(step_index=step.index))
         step.deadline = time.perf_counter() + config.step_timeout
 
@@ -114,6 +143,9 @@ def _run_steps(state: AgentState, context: RuntimeContext, persister):
                     ))
                     loop_detector.reset()
 
+            # 版本链条:本轮工具执行后封口 snapshot(对标 CC makeSnapshot,每轮末)
+            if _runtime_state.file_history:
+                _runtime_state.file_history.make_snapshot(step.index)
             sink.emit(StepEnd(step_index=step.index))
 
         except Exception as e:
@@ -212,6 +244,8 @@ def agentloop(user_input: str, context: RuntimeContext) -> AgentState:
     state = context.state or AgentState(max_steps=config.max_steps)
     sink = context.sink
     persister = Persister(state.run_id) if context.persist else None
+    _init_file_history(state.run_id, context.persist)   # 版本链条:按 run_id 初始化 file_history
+    _runtime_state.model_adapter = context.model_adapter   # 步3 WebFetch 用
 
     sink.emit(RunStart(run_id=state.run_id))
     state = _run_turn(user_input, state, context, persister)
@@ -219,7 +253,11 @@ def agentloop(user_input: str, context: RuntimeContext) -> AgentState:
     return state
 
 
-def run_agent_loop(registry: ToolRegistry, model_adapter: BaseModelAdapter, tool_executor: ToolExecutor, config: Optional[AgentConfig] = None):
+def run_agent_loop(registry: ToolRegistry,
+                 model_adapter: BaseModelAdapter,
+                 tool_executor: ToolExecutor, 
+                 config: Optional[AgentConfig] = None, memory_store=None,
+                 ):
     import sys
     import uuid
     from .streaming.printer import StreamingPrinter
@@ -236,6 +274,8 @@ def run_agent_loop(registry: ToolRegistry, model_adapter: BaseModelAdapter, tool
     session_run_id = str(uuid.uuid4())
     messages: list = []               # 跨轮累积上下文（内存共享 list）
     persister = Persister(session_run_id)
+    _init_file_history(session_run_id, True)   # 版本链条:REPL 持久化,按 session_run_id 初始化
+    _runtime_state.model_adapter = model_adapter   # 步3 WebFetch 用
     last_state = None
     try:
         while True:
@@ -255,6 +295,7 @@ def run_agent_loop(registry: ToolRegistry, model_adapter: BaseModelAdapter, tool
                 state=state,
                 sink=printer,
                 persist=True,
+                memory_store=memory_store,  # 步6:传给 builder 分层注入
             )
             # 文本/工具进度已在运行中由 StreamingPrinter 实时流式打印。
             # _run_turn 往 state.messages append user(in-place)；但 append_assistant/tool_result 返回
@@ -280,7 +321,15 @@ def main():
     if not pc.api_key:
         raise SystemExit("未设置 DEEPSEEK_API_KEY，请在 code/.env 配置 DEEPSEEK_API_KEY/BASE_URL/MODEL")
     model_adapter = make_adapter(pc)
-    tool_executor = ToolExecutor(registry)
+    tool_executor = ToolExecutor(registry, before_mutation=_track_edit_callback)
+
+     # 步6:创建 memory_store + 注册 save_memory 工具(闭包捕获 store)
+    from .memory import MemoryStore
+    from .persist.paths import memory_dir
+    from .tools.memory_tool import make_save_memory_tool
+    memory_store = MemoryStore(memory_dir())
+    registry.register(make_save_memory_tool(memory_store))
+
     # 用 provider 配置里的 model（DEEPSEEK_MODEL）覆盖 AgentConfig 默认的 deepseek-v4-pro，
     # 否则 agentloop 会把 context.config.model 直接发给 API，provider 的 model 形同虚设。
     run_agent_loop(registry, model_adapter, tool_executor, config=AgentConfig(model=pc.model))
