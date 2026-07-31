@@ -10,6 +10,8 @@ from .control.actions import Action, decide
 from .prompts import SOFT_STOP_HINT
 
 from .control.loop_detector import LoopDetector
+from .control.planner import Planner
+from .control.critic import Critic
 
 from .config.config import AgentConfig
 from .config.provider import load_provider_config, make_adapter
@@ -54,9 +56,11 @@ def _init_file_history(run_id: str, persist: bool):
     _runtime_state.file_history = FileHistory(run_dir(run_id) / "file-history")
 
 
-def _run_steps(state: AgentState, context: RuntimeContext, persister):
-    """Agent 主循环体（共享给 agentloop 正常 run 与 continue_loop 续跑）。
-    假设 state.messages 已初始化（正常 run 由 agentloop 初始化；resume 由 resume() 重建）。"""
+def _run_steps(state: AgentState, context: RuntimeContext, persister, subtask: bool = False):
+    """Agent 主循环体（共享给 agentloop 正常 run / continue_loop 续跑 / plan_execute 子任务）。
+    假设 state.messages 已初始化（正常 run 由 agentloop 初始化；resume 由 resume() 重建）。
+    subtask=True(plan_execute 子任务):FINISH 时不 complete(保持 running),只设 final_response;
+    超 max_steps 不转终态,回填提示让外层 plan_execute 继续下一步(对齐 stage7-plan §3.3)。"""
     config = context.config
     sink = context.sink
     loop_detector = LoopDetector(threshold=config.soft_stop_threshold)
@@ -98,7 +102,11 @@ def _run_steps(state: AgentState, context: RuntimeContext, persister):
                 # final 也进 messages 作历史（推翻 Decision 3：多轮对话需要上一轮最终回复作上下文，
                 # 否则下一轮 model 看不到、重复回答）。final_response 仍设，给 _emit_run_end 取 final_text。
                 state.messages = context.model_adapter.append_assistant(state.messages, model_response)
-                state.complete(model_response)
+                if subtask:
+                    # plan_execute 子任务:只设结果,不转终态(保持 running,让外层继续下一步)
+                    state.final_response = model_response
+                else:
+                    state.complete(model_response)
                 step.finish()
                 sink.emit(StepEnd(step_index=step.index))
                 return state
@@ -169,7 +177,13 @@ def _run_steps(state: AgentState, context: RuntimeContext, persister):
             # 可重试且未超阈值：继续下一轮（StepEnd 已发）
 
     if not state.is_terminal():
-        state.exceed_max_steps()
+        if subtask:
+            # plan_execute 子任务超 max_steps:不转终态,回填提示让外层 plan_execute 继续下一步
+            state.messages.append(Message(role="user",
+                content=f"[子任务超过 max_steps={state.max_steps},强制结束当前子任务]"))
+            state.final_response = None
+        else:
+            state.exceed_max_steps()
     return state
 def _run_turn(user_input: str, state: AgentState, context: RuntimeContext, persister):
     """单轮体（agentloop 与 REPL 复用）：初始化 messages + log_user + _run_steps。
@@ -183,7 +197,73 @@ def _run_turn(user_input: str, state: AgentState, context: RuntimeContext, persi
     if persister:
         persister.log_user(user_input)     # durability-first：先落盘再改内存
     # 2. 主循环（抽到 _run_steps，与 continue_loop 共享）
+    # 2. 按 mode 分流(阶段7):react=纯 agentic(默认);plan_execute=先规划再执行;workflow=固定 DAG(commit5)
+    mode = config.mode
+    if mode == "plan_execute":
+        return _run_plan_execute(user_input, state, context, persister)
+    if mode == "workflow":
+        return _run_workflow(state, context, persister)
     return _run_steps(state, context, persister)
+
+def _run_plan_execute(user_input: str, state: AgentState, context: RuntimeContext, persister):
+    """Plan-and-Execute 模式(阶段7):Planner 产 Plan -> 逐步 _run_steps(subtask=True) -> Critic 防漂移。
+    messages 已由 _run_turn 初始化(system+user)。Plan 不进 messages(外置防压缩吞,靠 ContextBuilder 注入当前 step)。
+    对齐 stage7-plan §3.3 subtask 轻解法:共享 state,FINISH 不 complete,steps 连续累积。"""
+    config = context.config
+    planner = Planner(context.model_adapter)
+    plan = planner.make_plan(user_input, context.registry)
+
+    for step_idx, plan_step in enumerate(plan.steps):
+        plan_step.status = "in_progress"
+        plan.status = "executing"
+        state.meta["current_plan_step"] = plan_step.content  # ContextBuilder 读它注入"聚焦当前子任务"
+        state.step_index = 0  # 重置:每个 plan step 独占 max_steps 预算,不累加
+        _run_steps(state, context, persister, subtask=True)  # FINISH 不 complete,保持 running
+        result = getattr(state.final_response, "text", "") if state.final_response else ""
+        plan_step.status = "completed"
+        plan_step.result = result
+        # 子任务结果作为 observation 回灌(对齐 CC:子 agent 结果 -> parent messages)
+        state.messages.append(Message(role="user",
+            content=f"[plan step 完成:{plan_step.content}]\n结果:{result}"))
+        # 防漂移:每 replan_every 步调 Critic 评估计划
+        if config.critic_enabled and step_idx % config.replan_every == config.replan_every - 1:
+            critique = Critic(context.model_adapter).evaluate_plan(plan, state)
+            if critique.needs_replan:
+                plan = planner.make_plan(user_input, context.registry, prior=plan)
+                plan.status = "replanned"
+
+    # 收尾:Critic 验收(可选);不通过也 complete(避免无限 replan,仅记录)
+    if config.critic_enabled and state.final_response is not None:
+        Critic(context.model_adapter).evaluate_result(
+            user_input, getattr(state.final_response, "text", "") or "")
+    state.complete(state.final_response)  # state 仍 running(subtask 未转终态),合法转 completed
+    return state
+
+
+def _run_workflow(state: AgentState, context: RuntimeContext, persister):
+    """Workflow 模式(阶段7):固定 tool_call DAG,LLM 不参与决策,直接 execute_many 按拓扑序执行。
+    复用阶段2 _dag_execute(depends_on)。Plan 从 state.meta['workflow_plan'] 读(list[ToolCall])。
+    对齐 stage7-plan §3.6:react=LLM 每步决策;plan_execute=LLM 产 Plan+逐步执行;workflow=固定 DAG,LLM 不决策。"""
+    config = context.config
+    sink = context.sink
+    calls = state.meta.get("workflow_plan", [])
+    if state.status == "created":
+        state.transition("running")
+    if not calls:
+        state.complete(None)
+        return state
+    state.transition("waiting_tool")
+    for r in context.tool_executor.execute_many(calls, timeout=config.step_timeout, sink=sink):
+        if persister:
+            persister.log_tool_result(r)
+        state.messages = context.model_adapter.append_tool_result(state.messages, r)
+        state.tool_history.append(ToolHistoryEntry(
+            call_id=r.call_id, tool_name=r.tool_name, ok=r.ok,
+            error_type=r.error.get("type") if r.error else None))
+    state.transition("running")
+    state.complete(None)  # workflow 无最终 LLM 回答(进阶可加 LLM 总结);complete(None) 收尾
+    return state
+
 
 def _emit_run_end(state: AgentState, sink):
     """发 RunEnd 流式事件（UI 用）。final_text 从 final_response 取。"""

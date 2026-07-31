@@ -74,6 +74,11 @@ class ContextBuilder:
         行为和原来 agentloop 直接用 state.messages 完全一致，只是把组装显式化了。
         """
         messages = list(state.messages)  # 浅拷贝:策略改副本,不动 state 原始 list
+        # 阶段7:plan_execute 模式,注入"当前子任务"system 提示(聚焦当前 plan step,防模型跳步)
+        current_plan_step = state.meta.get("current_plan_step")
+        if current_plan_step:
+            messages = [Message(role="system",
+                content=f"[当前子任务]{current_plan_step}\n聚焦完成它,不要跳到其他任务。")] + messages
         # 步3 第1层(无损):超大工具结果落盘,messages 换引用
         messages = apply_tool_result_budget(messages, state.run_id, self.tool_result_threshold)
         # 步4 第3层(低损):清老 tool_result content 成占位

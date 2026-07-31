@@ -39,3 +39,25 @@ SOFT_STOP_HINT = (
     "[系统提示] 检测到你在第 {step} 步重复调用工具 {tool}（相同参数），"
     "可能陷入循环。请换一种方法，或基于已有信息直接给出最终答案。"
 )
+
+# ---- 阶段 7 Plan-and-Execute 提示词 ----
+PLAN_PROMPT = """你是一个任务规划器。把给定任务拆解为 2~5 个可执行的子任务步骤,输出严格 JSON。
+
+格式:
+{"steps": [{"content": "祈使句描述,如 Run tests", "active_form": "现在进行时,如 Running tests"}, ...]}
+
+要求:
+- 每步是一个可独立执行的子任务,不要拆得过细。
+- 步骤顺序即执行顺序;有依赖时按序排列。
+- content 用祈使句(做什么),active_form 用现在进行时(正在做什么)。
+- 只输出 JSON,不要其他文字。"""
+
+# ---- 阶段 7 Critic 评审提示词 ----
+CRITIC_PROMPT = """你是一个评审器。评估给定任务的结果或计划是否达标,输出严格 JSON。
+
+格式:
+{"passed": true/false, "reason": "简短理由", "needs_replan": true/false}
+
+- passed: 结果/计划是否满足任务要求。
+- needs_replan: 计划是否漂移(剩余步骤不再合理),需重新规划。
+- 只输出 JSON,不要其他文字。"""
