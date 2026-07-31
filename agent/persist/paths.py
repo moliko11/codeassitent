@@ -13,15 +13,14 @@ def transcript_path(run_id: str) -> Path:
     return run_dir(run_id) / "transcript.jsonl"
 
 
+def trace_path(run_id: str) -> Path:
+    """trace.jsonl 落盘(阶段9 TraceStore 用,和 transcript 同 run_id 同目录)。"""
+    return run_dir(run_id) / "trace.jsonl"
+
+
 def tool_results_dir(run_id: str) -> Path:
     """工具结果落盘子目录(步3 ToolResultBudget 用)。不 mkdir,由调用方按需建。"""
     return run_dir(run_id) / "tool-results"
-
-def memory_dir() -> Path:
-    """长期记忆目录(步6 Memory 用,跨 run 共享,与 runs/ 平级)。会 mkdir。"""
-    d = PERSIST_ROOT.parent / "memory"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
 
 def memory_dir() -> Path:
     """长期记忆目录(步6 Memory 用,跨 run 共享,与 runs/ 平级)。会 mkdir。"""
