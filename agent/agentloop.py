@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from .core.errors import classify_error, ApprovalRequired
+from .core.errors import classify_error
 
 from .control.actions import Action, decide
 
@@ -175,14 +175,6 @@ def _run_steps(state: AgentState, context: RuntimeContext, persister, subtask: b
                 _runtime_state.file_history.make_snapshot(step.index)
             sink.emit(StepEnd(step_index=step.index))
 
-        except ApprovalRequired as e:
-            # 阶段8 HITL:高风险工具转 waiting_approval,暂存 pending call(续跑留 TODO)
-            state.transition("waiting_approval")
-            state.meta["pending_approval_call"] = e.call
-            state.meta["pending_approval_reason"] = e.reason
-            step.finish()
-            sink.emit(StepEnd(step_index=step.index))
-            return state
         except Exception as e:
             error = classify_error(e)
             step.error = error
@@ -438,6 +430,11 @@ def run_agent_loop(registry: ToolRegistry,
         # session 正常退出：写 run_end（用最后一轮 status）；崩在 finally 前则不写 -> resume 续跑
         if last_state is not None:
             persister.log_run_end(last_state.status, last_state.error)
+        # 阶段9:session 退出聚合 Metrics
+        from .tracing.metrics import MetricsCollector
+        rep = MetricsCollector().collect(tracer.trace)
+        print(f"[trace] session {rep.status} steps={rep.step_count} tools={rep.tool_count} "
+              f"tokens={rep.token_total} tool_ok={rep.tool_success_rate:.0%}", file=sys.stderr)
     finally:
         persister.close()
 

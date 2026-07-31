@@ -6,7 +6,7 @@ import time
 import jsonschema
 from jsonschema.exceptions import ValidationError
 
-from ..core.errors import ToolTimeoutError, classify_tool_error, ApprovalRequired
+from ..core.errors import ToolTimeoutError, classify_tool_error
 from ..reliability.retry import RetryPolicy
 from ..reliability.idempotency import IdempotencyStore
 from ..reliability.audit import AuditLogger
