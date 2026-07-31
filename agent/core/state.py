@@ -115,10 +115,10 @@ class AgentStep:
 # _TERMINAL_STATUSES = {"completed", "failed", "cancelled", "max_steps_exceeded"}
 
 _ALLOWED_TRANSITIONS: dict[AgentStatus, set[AgentStatus]] = {
-    "created": {"running"},
+    "created": {"running", "failed"},
     "running": {"waiting_tool", "waiting_approval", "completed",
                 "failed", "max_steps_exceeded", "cancelled"},
-    "waiting_tool":     {"running", "failed", "cancelled"},
+    "waiting_tool":     {"running", "failed", "cancelled", "waiting_approval"},
     "waiting_approval": {"running", "cancelled", "failed"},
     "completed": set(), 
     "cancelled": set(), 

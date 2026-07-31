@@ -6,6 +6,7 @@ from typing import Optional
 from .adapters.base import BaseModelAdapter
 from .config.config import AgentConfig
 from .context.builder import ContextBuilder
+from .guardrails import GuardrailRunner
 from .memory.store import MemoryStore
 from .core.state import AgentState
 from .tools.registry import ToolExecutor, ToolRegistry
@@ -23,3 +24,5 @@ class RuntimeContext:
 
     context_builder: Optional[ContextBuilder] = None  # 阶段 6：None 时 agentloop 从 config 现场构造
     memory_store: Optional[MemoryStore] = None        # 步6:长期记忆(None=不召回)
+    guardrail_runner: Optional[GuardrailRunner] = None  # 阶段8:安全护栏(None=不校验)
+    workspace: Optional["Workspace"] = None  # 阶段8:工作空间(None=工具退回 Path.resolve,不校验)

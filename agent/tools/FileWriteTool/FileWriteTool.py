@@ -26,7 +26,10 @@ WRITE_SCHEMA = {
     mutates_external=True,   # 走 before_mutation -> trackEdit 备份
 )
 def write(file_path, content):
-    path = Path(file_path).resolve()
+    ws = _runtime_state.workspace
+    path = ws.resolve(file_path) if ws else Path(file_path).resolve()
+    if ws and not ws.allows(file_path):
+        raise PermissionError(f"路径不在工作空间允许集内: {file_path}")
     abs_path = str(path)
     # 覆盖已有非空文件需先 Read;空文件视同新建(对标 CC:空文件不算"已有内容")。
     if path.exists() and path.stat().st_size > 0:

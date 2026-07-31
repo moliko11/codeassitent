@@ -1,9 +1,10 @@
 from dataclasses import dataclass, field
 import sys
 import time
+from pathlib import Path
 from typing import Any, Optional
 
-from .core.errors import classify_error
+from .core.errors import classify_error, ApprovalRequired
 
 from .control.actions import Action, decide
 
@@ -12,10 +13,13 @@ from .prompts import SOFT_STOP_HINT
 from .control.loop_detector import LoopDetector
 from .control.planner import Planner
 from .control.critic import Critic
+from .guardrails import (GuardrailRunner, PromptInjectionGuard,
+    PermissionGuard, HighRiskGuard, PIIGuard, IndirectInjectionGuard)
 
 from .config.config import AgentConfig
 from .config.provider import load_provider_config, make_adapter
 from .core.state import AgentState, ToolHistoryEntry
+from .core.workspace import Workspace
 
 from .adapters.base import BaseModelAdapter
 from .core.models import ModelRequest
@@ -101,6 +105,12 @@ def _run_steps(state: AgentState, context: RuntimeContext, persister, subtask: b
             if action == Action.FINISH:
                 # final 也进 messages 作历史（推翻 Decision 3：多轮对话需要上一轮最终回复作上下文，
                 # 否则下一轮 model 看不到、重复回答）。final_response 仍设，给 _emit_run_end 取 final_text。
+                # 阶段8: on_output Guardrail(PII 脱敏)在 append 前,脱敏进 messages + final
+                if context.guardrail_runner is not None:
+                    _final_text = getattr(model_response, "text", None) or ""
+                    _gr = context.guardrail_runner.run("on_output", _final_text, context)
+                    if _gr.action == "sanitize" and _gr.sanitized is not None:
+                        model_response.text = _gr.sanitized
                 state.messages = context.model_adapter.append_assistant(state.messages, model_response)
                 if subtask:
                     # plan_execute 子任务:只设结果,不转终态(保持 running,让外层继续下一步)
@@ -156,6 +166,14 @@ def _run_steps(state: AgentState, context: RuntimeContext, persister, subtask: b
                 _runtime_state.file_history.make_snapshot(step.index)
             sink.emit(StepEnd(step_index=step.index))
 
+        except ApprovalRequired as e:
+            # 阶段8 HITL:高风险工具转 waiting_approval,暂存 pending call(续跑留 TODO)
+            state.transition("waiting_approval")
+            state.meta["pending_approval_call"] = e.call
+            state.meta["pending_approval_reason"] = e.reason
+            step.finish()
+            sink.emit(StepEnd(step_index=step.index))
+            return state
         except Exception as e:
             error = classify_error(e)
             step.error = error
@@ -193,6 +211,12 @@ def _run_turn(user_input: str, state: AgentState, context: RuntimeContext, persi
     #    判据：state.messages 是否为空——空=首轮，非空=续轮(已有跨轮历史)
     if not state.messages and config.system_prompt:
         state.messages.append(Message(role="system", content=config.system_prompt))
+    # 阶段8: on_input Guardrail(prompt 注入检测),block 则不进 messages
+    if context.guardrail_runner is not None:
+        gr = context.guardrail_runner.run("on_input", user_input, context)
+        if gr.action == "block":
+            state.fail({"type": "GuardrailBlocked", "message": f"输入被拦截:{gr.reason}"})
+            return state
     state.messages.append(Message(role="user", content=user_input))
     if persister:
         persister.log_user(user_input)     # durability-first：先落盘再改内存
@@ -326,6 +350,7 @@ def agentloop(user_input: str, context: RuntimeContext) -> AgentState:
     persister = Persister(state.run_id) if context.persist else None
     _init_file_history(state.run_id, context.persist)   # 版本链条:按 run_id 初始化 file_history
     _runtime_state.model_adapter = context.model_adapter   # 步3 WebFetch 用
+    _runtime_state.workspace = context.workspace  # 阶段8:路径权限(None=退回 Path.resolve)
 
     sink.emit(RunStart(run_id=state.run_id))
     state = _run_turn(user_input, state, context, persister)
@@ -356,6 +381,7 @@ def run_agent_loop(registry: ToolRegistry,
     persister = Persister(session_run_id)
     _init_file_history(session_run_id, True)   # 版本链条:REPL 持久化,按 session_run_id 初始化
     _runtime_state.model_adapter = model_adapter   # 步3 WebFetch 用
+    _runtime_state.workspace = Workspace(root=Path.cwd())  # 阶段8:REPL 工作空间=cwd
     last_state = None
     try:
         while True:
@@ -375,6 +401,7 @@ def run_agent_loop(registry: ToolRegistry,
                 state=state,
                 sink=printer,
                 persist=True,
+                guardrail_runner=tool_executor.guardrail_runner,  # 阶段8
                 memory_store=memory_store,  # 步6:传给 builder 分层注入
             )
             # 文本/工具进度已在运行中由 StreamingPrinter 实时流式打印。
@@ -401,7 +428,14 @@ def main():
     if not pc.api_key:
         raise SystemExit("未设置 DEEPSEEK_API_KEY，请在 code/.env 配置 DEEPSEEK_API_KEY/BASE_URL/MODEL")
     model_adapter = make_adapter(pc)
-    tool_executor = ToolExecutor(registry, before_mutation=_track_edit_callback)
+    config = AgentConfig(model=pc.model)
+    # 阶段8: GuardrailRunner + 默认 Guard(输入/工具/输出层)
+    guardrail_runner = GuardrailRunner()
+    guardrail_runner.register(PromptInjectionGuard()) \
+        .register(PermissionGuard()).register(HighRiskGuard()) \
+        .register(PIIGuard()).register(IndirectInjectionGuard())
+    tool_executor = ToolExecutor(registry, before_mutation=_track_edit_callback,
+                                  guardrail_runner=guardrail_runner, config=config)
 
      # 步6:创建 memory_store + 注册 save_memory 工具(闭包捕获 store)
     from .memory import MemoryStore
@@ -412,6 +446,6 @@ def main():
 
     # 用 provider 配置里的 model（DEEPSEEK_MODEL）覆盖 AgentConfig 默认的 deepseek-v4-pro，
     # 否则 agentloop 会把 context.config.model 直接发给 API，provider 的 model 形同虚设。
-    run_agent_loop(registry, model_adapter, tool_executor, config=AgentConfig(model=pc.model))
+    run_agent_loop(registry, model_adapter, tool_executor, config=config)
 if __name__ == "__main__":
     main()

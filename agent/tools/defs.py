@@ -17,6 +17,7 @@ class ToolSpec:
     fallback_tool_name: str | None = None # 失败时 fallback 到另一个工具（如：调用模型失败时 fallback 到本地工具）
     idempotent: bool = False # 是否幂等（同一 call_id 重复调用不会有副作用），用于幂等去重缓存
     mutates_external: bool = False   # 是否修改外部状态(文件/DB)；True 时 需要谨慎
+    high_risk: bool = False  # 阶段8:高风险工具(删数据/支付/改权限),触发 HITL 审批
     
 @dataclass
 class Tool:

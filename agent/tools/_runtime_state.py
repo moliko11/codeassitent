@@ -22,12 +22,14 @@ read_file_state: dict[str, ReadRecord] = {}
 file_history = None           # 由 agentloop 注入 FileHistory 实例(commit 4)
 current_step_id: int = 0      # 当前 step_index,before_mutation 回调读它做 track_edit 的 step_id(commit 4)
 model_adapter = None          # 步3 WebFetch 用(调 LLM 提取),agentloop 注入
+workspace = None              # 阶段8:Workspace 实例,agentloop 注入(路径权限;None=退回 Path.resolve)
 
 
 def reset():
     """测试用:清空模块级状态,防测试间残留(任务文档测试前置要求)。"""
     read_file_state.clear()
-    global file_history, current_step_id, model_adapter
+    global file_history, current_step_id, model_adapter, workspace
     file_history = None
     current_step_id = 0
     model_adapter = None
+    workspace = None

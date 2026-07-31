@@ -28,7 +28,10 @@ EDIT_SCHEMA = {
     mutates_external=True,   # 走 before_mutation -> trackEdit 备份
 )
 def edit(file_path, old_string, new_string, replace_all=False):
-    path = Path(file_path).resolve()
+    ws = _runtime_state.workspace
+    path = ws.resolve(file_path) if ws else Path(file_path).resolve()
+    if ws and not ws.allows(file_path):
+        raise PermissionError(f"路径不在工作空间允许集内: {file_path}")
     abs_path = str(path)
     # 闸门 1:先读后改(对标 FileEditTool.ts:275-287)
     rec = _runtime_state.read_file_state.get(abs_path)

@@ -6,7 +6,7 @@ import time
 import jsonschema
 from jsonschema.exceptions import ValidationError
 
-from ..core.errors import ToolTimeoutError, classify_tool_error
+from ..core.errors import ToolTimeoutError, classify_tool_error, ApprovalRequired
 from ..reliability.retry import RetryPolicy
 from ..reliability.idempotency import IdempotencyStore
 from ..reliability.audit import AuditLogger
@@ -52,18 +52,27 @@ registry = ToolRegistry()
 
 
 def tool(name, description, input_schema, examples=None, returns="",
-         idempotent=False, fallback_tool_name=None, mutates_external=False):
+         idempotent=False, fallback_tool_name=None, mutates_external=False,
+         high_risk=False):
     def decorator(func):
         registry.register(Tool(
             tool_spec=ToolSpec(name=name, description=description,
                                input_schema=input_schema,
                                examples=examples or [], returns=returns,
                                idempotent=idempotent, fallback_tool_name=fallback_tool_name,
-                               mutates_external=mutates_external),
+                               mutates_external=mutates_external, high_risk=high_risk),
             handler=func,
         ))
         return func
     return decorator
+
+
+class _GuardContext:
+    """execute 管道内传给 Guardrail.check 的最小 context(只含 config + registry)。
+    避免把整个 RuntimeContext 传进 tools 层(防反向依赖)。"""
+    def __init__(self, config=None, registry=None):
+        self.config = config
+        self.registry = registry
 
 
 class ToolExecutor:
@@ -71,7 +80,7 @@ class ToolExecutor:
                  retry_policy: RetryPolicy = None, retry_mode="llm_retry",
                  breaker_config=BreakerConfig(), idempotency_store: IdempotencyStore = None,
                  audit_logger: AuditLogger = None,
-                 before_mutation=None):
+                 before_mutation=None, guardrail_runner=None, config=None):
         """工具执行器。
 
         可靠性参数（均可选，不传则该机制不生效）：
@@ -90,6 +99,8 @@ class ToolExecutor:
         self.audit_logger = audit_logger
         self._breakers: dict[str, CircuitBreaker] = {}   # per-tool 懒建
         self.before_mutation = before_mutation   # 留点：将来 FileEditTool 在这 track_edit(备份编辑前内容)
+        self.guardrail_runner = guardrail_runner  # 阶段8:before_tool/after_tool 护栏(None=不校验)
+        self.config = config  # 阶段8:Guardrail.check 读 config.allowed_tools
 
     def _get_breaker(self, tool_name) -> CircuitBreaker:
         return self._breakers.setdefault(tool_name, CircuitBreaker(self.breaker_config))
@@ -105,6 +116,19 @@ class ToolExecutor:
         tool, pre_err = self._precheck(call)
         if pre_err is not None:
             return self._done(pre_err, call, user_id, start_ts)
+
+        # 阶段8: before_tool Guardrail(权限白名单 / 高风险审批)
+        if self.guardrail_runner is not None:
+            gctx = _GuardContext(config=self.config, registry=self.registry)
+            gr = self.guardrail_runner.run("before_tool", call, gctx)
+            if gr.action == "needs_approval":
+                # 阶段8 HITL:抛 ApprovalRequired,agentloop 捕获转 waiting_approval
+                raise ApprovalRequired(call, gr.reason)
+            if gr.action == "block":
+                blocked = ToolResult(call_id=call.call_id, tool_name=call.tool_name,
+                    ok=False, error={"type": "GuardrailBlocked", "message": gr.reason, "retryable": False},
+                    meta=call.meta)
+                return self._done(blocked, call, user_id, start_ts)
 
         # 变更前钩子（留点：mutates_external 的工具编辑前备份，同 CC trackEdit）
         if tool.tool_spec.mutates_external and self.before_mutation:
@@ -145,6 +169,17 @@ class ToolExecutor:
         # 6. fallback
         if not result.ok and tool.tool_spec.fallback_tool_name:
             result = self._run_fallback(call, tool.tool_spec.fallback_tool_name, timeout, cancel_event)
+
+        # 阶段8: after_tool Guardrail(工具结果诱导检测 / PII 脱敏)
+        if self.guardrail_runner is not None:
+            gctx = _GuardContext(config=self.config, registry=self.registry)
+            gr = self.guardrail_runner.run("after_tool", result, gctx)
+            if gr.action == "block":
+                result = ToolResult(call_id=call.call_id, tool_name=call.tool_name,
+                    ok=False, error={"type": "GuardrailBlocked", "message": gr.reason, "retryable": False},
+                    meta=call.meta)
+            elif gr.action == "sanitize" and gr.sanitized is not None:
+                result.text = gr.sanitized
 
         # 7. 收尾
         return self._done(result, call, user_id, start_ts)
