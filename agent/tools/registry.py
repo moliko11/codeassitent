@@ -123,7 +123,7 @@ class ToolExecutor:
             gr = self.guardrail_runner.run("before_tool", call, gctx)
             if gr.action == "needs_approval":
                 # 阶段8 HITL:抛 ApprovalRequired,agentloop 捕获转 waiting_approval
-                raise ApprovalRequired(call, gr.reason)
+                return self._done(ToolResult(call_id=call.call_id, tool_name=call.tool_name, ok=False, error={"type": "NeedsApproval", "message": gr.reason, "retryable": False}, meta=call.meta), call, user_id, start_ts)
             if gr.action == "block":
                 blocked = ToolResult(call_id=call.call_id, tool_name=call.tool_name,
                     ok=False, error={"type": "GuardrailBlocked", "message": gr.reason, "retryable": False},

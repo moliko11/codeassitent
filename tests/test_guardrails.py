@@ -73,8 +73,9 @@ def test_high_risk_approval():
     r = GuardrailRunner()
     r.register(HighRiskGuard())
     exe = ToolExecutor(reg, guardrail_runner=r, config=None)
-    with pytest.raises(ApprovalRequired):
-        exe.execute(ToolCall(call_id="x", tool_name="danger", arguments={}))
+    r_result = exe.execute(ToolCall(call_id="x", tool_name="danger", arguments={}))
+    assert r_result.ok is False
+    assert r_result.error["type"] == "NeedsApproval"
 
 
 # ─────────────────── 输出层:PIIGuard / IndirectInjectionGuard ───────────────────

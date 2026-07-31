@@ -132,6 +132,15 @@ def _run_steps(state: AgentState, context: RuntimeContext, persister, subtask: b
             for r in context.tool_executor.execute_many(
                 model_response.tool_calls, timeout=config.step_timeout, sink=sink
             ):
+                # 阶段8/9 HITL:needs_approval(高风险)转 waiting_approval(暂停,续跑留 TODO)
+                # needs_approval 通过 ToolEnd(error_type=NeedsApproval)进 trace,Tracer 自动捕获
+                if r.error and r.error.get("type") == "NeedsApproval":
+                    state.transition("waiting_approval")
+                    state.meta["pending_approval_call"] = next(
+                        (c for c in model_response.tool_calls if c.call_id == r.call_id), None)
+                    step.finish()
+                    sink.emit(StepEnd(step_index=step.index))
+                    return state
                 if persister:
                     persister.log_tool_result(r)
                 state.messages = context.model_adapter.append_tool_result(state.messages, r)
@@ -346,6 +355,11 @@ def agentloop(user_input: str, context: RuntimeContext) -> AgentState:
     自建 Persister、结束写 run_end + close。REPL 多轮复用走 _run_turn，不经过这里。"""
     config = context.config or AgentConfig()
     state = context.state or AgentState(max_steps=config.max_steps)
+    # 阶段9:挂 Tracer(CompositeSink:原 sink + tracer,零侵入主循环)
+    from .streaming.sink import CompositeSink
+    from .tracing import Tracer, TraceStore
+    tracer = Tracer(state.run_id, store=TraceStore(state.run_id) if context.persist else None)
+    context.sink = CompositeSink(context.sink, tracer)
     sink = context.sink
     persister = Persister(state.run_id) if context.persist else None
     _init_file_history(state.run_id, context.persist)   # 版本链条:按 run_id 初始化 file_history
@@ -355,6 +369,11 @@ def agentloop(user_input: str, context: RuntimeContext) -> AgentState:
     sink.emit(RunStart(run_id=state.run_id))
     state = _run_turn(user_input, state, context, persister)
     _end_run(state, sink, persister)
+    # 阶段9:run 结束聚合 Metrics(打印到 stderr)
+    from .tracing.metrics import MetricsCollector
+    rep = MetricsCollector().collect(tracer.trace)
+    print(f"[trace] {rep.status} steps={rep.step_count} tools={rep.tool_count} "
+          f"tokens={rep.token_total} tool_ok={rep.tool_success_rate:.0%}", file=sys.stderr)
     return state
 
 
@@ -377,6 +396,9 @@ def run_agent_loop(registry: ToolRegistry,
     # 会话级单 run_id（对齐 CC）：整个 REPL session 共用一个 transcript.jsonl，跨轮 append；
     # 退出时才写 run_end。崩在中途无 run_end -> resume 按最后状态续跑（durability-first 的保证）。
     session_run_id = str(uuid.uuid4())
+    from .streaming.sink import CompositeSink
+    from .tracing import Tracer, TraceStore
+    tracer = Tracer(session_run_id, store=TraceStore(session_run_id))
     messages: list = []               # 跨轮累积上下文（内存共享 list）
     persister = Persister(session_run_id)
     _init_file_history(session_run_id, True)   # 版本链条:REPL 持久化,按 session_run_id 初始化
@@ -399,7 +421,7 @@ def run_agent_loop(registry: ToolRegistry,
                 tool_executor=tool_executor,
                 config=config,
                 state=state,
-                sink=printer,
+                sink=CompositeSink(printer, tracer),
                 persist=True,
                 guardrail_runner=tool_executor.guardrail_runner,  # 阶段8
                 memory_store=memory_store,  # 步6:传给 builder 分层注入
