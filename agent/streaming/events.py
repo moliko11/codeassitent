@@ -68,6 +68,14 @@ class TextDelta:
 
 
 @dataclass(frozen=True)
+class ThinkingDelta:
+    """一段流式 thinking/reasoning 增量（模型内部 CoT，区别于最终回答 TextDelta）。
+    DeepSeek 的 reasoning_content / ark 的 thinking / Claude 的 thinking block。
+    expose_reasoning=False 时 printer 不渲染（对齐 CC 隐藏内部推理），最终回答(TextDelta)始终可见。"""
+    text: str
+
+
+@dataclass(frozen=True)
 class ToolCallStart:
     """模型开始产出第 index 个工具调用（拿到 call_id / tool_name）"""
     call_id: str
@@ -99,5 +107,5 @@ StreamEvent = Union[
     # 高层
     RunStart, StepStart, StepEnd, RunEnd, ToolStart, ToolEnd,
     # 低层
-    TextDelta, ToolCallStart, ToolCallDelta, ToolCallEnd, MessageEnd,
+    TextDelta, ThinkingDelta, ToolCallStart, ToolCallDelta, ToolCallEnd, MessageEnd,
 ]

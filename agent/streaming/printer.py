@@ -12,7 +12,7 @@ import sys
 from typing import Any, TextIO
 
 from .sink import EventSink
-from .events import TextDelta, ToolStart, ToolEnd, RunEnd
+from .events import TextDelta, ThinkingDelta, ToolStart, ToolEnd, RunEnd
 
 # ANSI 颜色（Win10+ 原生支持；use_color=False 时降级为纯文本，避免乱码）
 _CYAN = "\033[36m"
@@ -42,9 +42,11 @@ class StreamingPrinter(EventSink):
     用法：作为 RuntimeContext.sink 传入；agentloop 运行时事件实时打印。
     """
 
-    def __init__(self, out: TextIO | None = None, use_color: bool = True):
+    def __init__(self, out: TextIO | None = None, use_color: bool = True,
+                 expose_reasoning: bool = True):
         self.out = out or sys.stdout
         self.use_color = use_color
+        self.expose_reasoning = expose_reasoning  # 阶段7:False 时隐藏 ThinkingDelta(内部 CoT),最终回答不受影响
         self._in_text = False  # 是否正处在逐字文本输出中（ToolStart/RunEnd 前需补换行）
 
     def _c(self, code: str, s: str) -> str:
@@ -72,8 +74,16 @@ class StreamingPrinter(EventSink):
     def emit(self, event) -> None:
         match event:
             case TextDelta(text):
-                # 不换行逐字输出 -> 打字机效果
+                # 不换行逐字输出 -> 打字机效果（最终回答,始终可见,不受 expose_reasoning 影响）
                 self._write(text)
+                self.out.flush()
+                self._in_text = True
+
+            case ThinkingDelta(text):
+                # 模型内部 CoT:expose_reasoning=False 时隐藏（对齐 CC）;True 时用 dim 灰色区分正文
+                if not self.expose_reasoning:
+                    return
+                self._write(self._c(_DIM, text))
                 self.out.flush()
                 self._in_text = True
 

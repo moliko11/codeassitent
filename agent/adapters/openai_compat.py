@@ -8,7 +8,7 @@ from ..core.messages import Message
 from ..core.models import ModelRequest, ModelResponse, TokenUsage
 from ..tools.defs import ToolCall, ToolResult, ToolSpec
 from ..streaming.sink import EventSink
-from ..streaming.events import TextDelta, ToolCallStart, ToolCallDelta, ToolCallEnd, MessageEnd
+from ..streaming.events import TextDelta, ThinkingDelta, ToolCallStart, ToolCallDelta, ToolCallEnd, MessageEnd
 from .base import BaseModelAdapter
 
 
@@ -44,6 +44,7 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
             kwargs["tool_choice"] = request.meta["tool_choice"]
         if "parallel_tool_calls" in request.meta:
             kwargs["parallel_tool_calls"] = request.meta["parallel_tool_calls"]
+        # TODO(阶段7): request.thinking_budget 透传 provider(DeepSeek enable_thinking/reasoning_budget?参数名待真实联调确认,暂不传避免 provider 拒绝)
 
         response = self.client.chat.completions.create(**kwargs)
         return self._from_chat_response(response)
@@ -109,6 +110,12 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
             if content:
                 text_parts.append(content)
                 sink.emit(TextDelta(text=content))
+
+            # thinking/reasoning 增量(阶段7):DeepSeek 的 reasoning_content,推 ThinkingDelta
+            # 与 text 分开:reasoning 是内部 CoT(暴露受 expose_reasoning 控制),text 是最终回答始终显示
+            reasoning = getattr(delta, "reasoning_content", None)
+            if reasoning:
+                sink.emit(ThinkingDelta(text=reasoning))
 
             # 工具调用增量
             for tc_delta in getattr(delta, "tool_calls", None) or []:

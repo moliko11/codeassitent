@@ -8,7 +8,7 @@ from ..core.messages import Message
 from ..core.models import ModelRequest, ModelResponse, TokenUsage
 from ..tools.defs import ToolCall, ToolResult, ToolSpec
 from ..streaming.sink import EventSink
-from ..streaming.events import TextDelta, ToolCallStart, ToolCallDelta, ToolCallEnd, MessageEnd
+from ..streaming.events import TextDelta, ThinkingDelta, ToolCallStart, ToolCallDelta, ToolCallEnd, MessageEnd
 from .base import BaseModelAdapter
 
 
@@ -45,6 +45,7 @@ class ArkAdapter(BaseModelAdapter):
         if request.max_tokens is not None:
             # Responses API 用 max_output_tokens（不是 Chat Completions 的 max_tokens）
             kwargs["max_output_tokens"] = request.max_tokens
+        # TODO(阶段7): request.thinking_budget 透传 provider(ark thinking 参数?待真实联调确认,暂不传)
 
         response = self.client.responses.create(**kwargs)
         return self._from_response(response)
@@ -93,6 +94,13 @@ class ArkAdapter(BaseModelAdapter):
                 if d:
                     text_parts.append(d)
                     sink.emit(TextDelta(text=d))
+
+            elif etype == "response.reasoning_text.delta":
+                # thinking/reasoning 增量(阶段7):豆包 thinking,推 ThinkingDelta
+                # 注:事件类型名基于 Responses API 推断,待真实联调确认;不匹配则不推(降级,不影响功能)
+                d = getattr(event, "delta", "") or ""
+                if d:
+                    sink.emit(ThinkingDelta(text=d))
 
             elif etype == "response.output_item.added":
                 item = getattr(event, "item", None)

@@ -22,6 +22,7 @@ class ModelRequest:
     model: Optional[str] = None          # 模型标识
     temperature: Optional[float] = None  # 温度系数
     max_tokens: Optional[int] = None     # 最大生成长度
+    thinking_budget: Optional[int] = None # 阶段 7:thinking token 预算(透传 provider,不支持则忽略)
     meta: dict[str, Any] = field(default_factory=dict)
 
 
