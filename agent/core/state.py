@@ -89,6 +89,28 @@ class AgentStep:
             2
         )
 
+    # ---- ReAct 形式化(阶段 7 任务 1):纯视图,底层复用现有字段,不改控制流 ----
+    # ReAct = Thought(模型 text)/ Action(tool_calls)/ Observation(tool_results)
+    # 对齐 CC:CC 靠 message content block 的 type 隐式区分(text/thinking=Thought,
+    # tool_use=Action, tool_result=Observation),无显式类;我们用 @property 显式暴露。
+    @property
+    def thought(self) -> str:
+        """Thought = 模型本轮的文本推理。
+        model_response 可能为 None(resume 中途/纯工具轮),返回 ''。"""
+        if self.model_response is None:
+            return ""
+        return getattr(self.model_response, "text", None) or ""
+
+    @property
+    def actions(self) -> list:
+        """Action = 本轮 tool_calls。"""
+        return self.tool_calls
+
+    @property
+    def observations(self) -> list:
+        """Observation = 本轮 tool_results。"""
+        return self.tool_results
+
 #终态集合:一旦进入就不再继续循环（与 AgentStatus 的终态保持一致）
 # _TERMINAL_STATUSES = {"completed", "failed", "cancelled", "max_steps_exceeded"}
 
