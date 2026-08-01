@@ -4,6 +4,7 @@
 不依赖真实 LLM。fileHistory 是纯 stdlib 底座,直接构造测;
 工具测试直接调 tool.handler(...)(不经 executor,快);备份联动测试走 ToolExecutor + before_mutation。
 """
+import asyncio
 import os
 import time
 
@@ -482,7 +483,7 @@ class _ScriptedAdapter(BaseModelAdapter):
         super().__init__(api_key="", base_url="", model="")
         self.script = list(script)
 
-    def call_llm(self, request):
+    async def call_llm(self, request):
         if self.script:
             return self.script.pop(0)
         return ModelResponse(text="done")
@@ -509,7 +510,7 @@ def test_integration_read_edit_rewind(tmp_path):
     executor = ToolExecutor(registry, before_mutation=_track_edit_callback)
     ctx = RuntimeContext(registry=registry, model_adapter=adapter, tool_executor=executor,
                          config=AgentConfig(max_steps=5), state=AgentState())
-    agentloop("改一下", ctx)
+    asyncio.run(agentloop("改一下", ctx))
     assert a.read_text(encoding="utf-8") == "改后"
     fh.rewind(INITIAL_STEP_ID)   # make_snapshot 已在每步末调,rewind 回原版
     assert a.read_text(encoding="utf-8") == "原版"
@@ -528,7 +529,7 @@ def test_integration_write_new_file_rewind_deletes(tmp_path):
     executor = ToolExecutor(registry, before_mutation=_track_edit_callback)
     ctx = RuntimeContext(registry=registry, model_adapter=adapter, tool_executor=executor,
                          config=AgentConfig(max_steps=5), state=AgentState())
-    agentloop("建文件", ctx)
+    asyncio.run(agentloop("建文件", ctx))
     assert a.exists()
     assert a.read_text(encoding="utf-8") == "新建内容"
     fh.rewind(INITIAL_STEP_ID)   # null backup -> unlink
@@ -552,7 +553,7 @@ def test_integration_read_edit_bash_rewind(tmp_path):
     executor = ToolExecutor(registry, before_mutation=_track_edit_callback)
     ctx = RuntimeContext(registry=registry, model_adapter=adapter, tool_executor=executor,
                          config=AgentConfig(max_steps=6), state=AgentState())
-    agentloop("改并验证", ctx)
+    asyncio.run(agentloop("改并验证", ctx))
     assert a.read_text(encoding="utf-8") == "version=2"
     fh.rewind(INITIAL_STEP_ID)
     assert a.read_text(encoding="utf-8") == "version=1"
@@ -604,7 +605,7 @@ def test_web_search_network_error(monkeypatch):
 
 class _MockAdapter:
     """WebFetch 测试用:call_llm 返回固定提取结果(不调真实 LLM)。"""
-    def call_llm(self, request):
+    async def call_llm(self, request):
         class R:
             text = "提取结果:Hello"
         return R()

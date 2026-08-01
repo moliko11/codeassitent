@@ -15,6 +15,7 @@
 
 import io
 import json
+import asyncio
 import pytest
 
 from agent.agentloop import agentloop
@@ -50,7 +51,7 @@ class _PlanExecuteAdapter(BaseModelAdapter):
         self.critic_calls = 0
         self.step_calls = 0
 
-    def call_llm(self, request):
+    async def call_llm(self, request):
         from agent.prompts import PLAN_PROMPT, CRITIC_PROMPT
         first = request.messages[0] if request.messages else None
         sys_content = first.content if (
@@ -115,7 +116,7 @@ def test_plan_execute_runs_steps():
         config=AgentConfig(mode="plan_execute", max_steps=5, critic_enabled=False),
         state=AgentState(max_steps=5),
     )
-    state = agentloop("完成某任务", ctx)
+    state = asyncio.run(agentloop("完成某任务", ctx))
     assert state.status == "completed"
     assert adapter.plan_calls == 1   # Planner 调一次产 Plan
     assert adapter.step_calls == 2   # 2 个 plan step 各跑一次 _run_steps
@@ -134,7 +135,7 @@ def test_replan_on_drift():
                            critic_enabled=True, replan_every=1),
         state=AgentState(max_steps=5),
     )
-    state = agentloop("完成某任务", ctx)
+    state = asyncio.run(agentloop("完成某任务", ctx))
     assert state.status == "completed"
     assert adapter.plan_calls >= 2      # 原 plan + 至少一次 replan
     assert adapter.critic_calls >= 1    # Critic 被调
@@ -151,7 +152,7 @@ def test_critic_evaluates_result():
                            critic_enabled=True, replan_every=3),
         state=AgentState(max_steps=5),
     )
-    state = agentloop("完成某任务", ctx)
+    state = asyncio.run(agentloop("完成某任务", ctx))
     assert state.status == "completed"
     assert adapter.critic_calls >= 1    # 收尾 evaluate_result 被调
 
@@ -203,7 +204,7 @@ def test_workflow_dag():
         config=AgentConfig(mode="workflow", max_steps=5),
         state=state,
     )
-    result = agentloop("跑工作流", ctx)
+    result = asyncio.run(agentloop("跑工作流", ctx))
     assert result.status == "completed"
     assert len(result.tool_history) == 2   # 两个工具都执行了
     assert adapter.plan_calls == 0          # workflow 不调 LLM 决策

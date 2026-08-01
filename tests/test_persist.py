@@ -8,6 +8,8 @@
 不依赖真实 LLM API。运行（从 code/ 目录，3.12 venv）：
     python -m pytest tests/test_persist.py -v
 """
+import asyncio
+
 import pytest
 
 from agent.agentloop import agentloop, continue_loop, _run_turn, _emit_run_end
@@ -51,7 +53,7 @@ class _ScriptedAdapter(BaseModelAdapter):
         self.i = 0
         self.call_count = 0
 
-    def call_llm(self, request):
+    async def call_llm(self, request):
         self.call_count += 1
         resp = self.script[self.i]
         self.i += 1
@@ -125,7 +127,7 @@ def test_replay_no_llm_call():
         ModelResponse(tool_calls=[ToolCall(call_id="c1", tool_name="echo", arguments={"x": 1})]),
         ModelResponse(text="done"),
     ])
-    live_state = agentloop("hi", _ctx(reg, live_adapter))
+    live_state = asyncio.run(agentloop("hi", _ctx(reg, live_adapter)))
     run_id = live_state.run_id
 
     assert live_state.status == "completed"
@@ -179,7 +181,7 @@ def test_resume_no_replay_of_done_tools():
     assert tool_calls == []                       # resume 没重跑任何工具
 
     # continue_loop 续跑
-    state2 = continue_loop(state, _ctx(reg, adapter, state=state))
+    state2 = asyncio.run(continue_loop(state, _ctx(reg, adapter, state=state)))
 
     # 断言：只跑了续跑的新工具 c3，c1/c2 未被重调
     assert len(tool_calls) == 1
@@ -215,7 +217,7 @@ def test_resume_pending_per_call_id():
     assert adapter.call_count == 0
     assert tool_calls == []                       # resume 没执行任何工具
 
-    state2 = continue_loop(state, _ctx(reg, adapter, state=state))
+    state2 = asyncio.run(continue_loop(state, _ctx(reg, adapter, state=state)))
 
     # 断言：c2 被重跑（无 result 记录），c1 未被重跑（有录好的 result 充当幂等表）
     assert len(tool_calls) == 1
@@ -279,14 +281,14 @@ def test_repl_session_single_transcript():
     s1 = AgentState(run_id=run_id, max_steps=10)
     s1.messages = messages
     ctx1 = _ctx(reg, adapter, state=s1)
-    s1 = _run_turn("msg-1", s1, ctx1, p)
+    s1 = asyncio.run(_run_turn("msg-1", s1, ctx1, p))
     _emit_run_end(s1, ctx1.sink)          # 每轮只发 UI 事件，不 log_run_end
     messages = s1.messages                 # REPL 同步（bug2：append 返回 copy，需同步回 messages）
     # 轮 2（共用 run_id + messages + persister）
     s2 = AgentState(run_id=run_id, max_steps=10)
     s2.messages = messages
     ctx2 = _ctx(reg, adapter, state=s2)
-    s2 = _run_turn("msg-2", s2, ctx2, p)
+    s2 = asyncio.run(_run_turn("msg-2", s2, ctx2, p))
     _emit_run_end(s2, ctx2.sink)
     messages = s2.messages
     # session 退出：才写 run_end（用最后一轮 status）
@@ -334,7 +336,7 @@ def test_resume_multi_turn_continue():
     assert tool_calls == []                       # resume 没执行工具
     assert not state.is_terminal()                # 修复①：中间轮 final 不设终态
 
-    state2 = continue_loop(state, _ctx(reg, adapter, state=state))
+    state2 = asyncio.run(continue_loop(state, _ctx(reg, adapter, state=state)))
     # 修复②：step_index 重置后能续跑；只重跑 c2（pending），c1 不重跑（有 result）；然后 final
     assert len(tool_calls) == 1
     assert tool_calls[0] == {"x": 2}
@@ -353,7 +355,7 @@ def test_final_enters_messages():
     run_id = "t-final-in-msg"
     p = Persister(run_id)
     s = AgentState(run_id=run_id, max_steps=10)
-    s = _run_turn("hi", s, _ctx(reg, adapter, state=s), p)
+    s = asyncio.run(_run_turn("hi", s, _ctx(reg, adapter, state=s), p))
     p.close()
     # final 回复进了 messages（修复前只有 user）
     roles = [getattr(m, "role", None) for m in s.messages]
@@ -376,13 +378,13 @@ def test_repl_cross_turn_context():
     # 轮1：CALL_TOOLS（append_assistant 返回新 list，state.messages 离开共享 messages 对象）
     s1 = AgentState(run_id=run_id, max_steps=10)
     s1.messages = messages
-    s1 = _run_turn("msg-1", s1, _ctx(reg, adapter, state=s1), p)
+    s1 = asyncio.run(_run_turn("msg-1", s1, _ctx(reg, adapter, state=s1), p))
     messages = s1.messages   # ← REPL 同步（去掉这行就复现 bug2：轮2 看不到轮1 的 assistant/tool）
 
     # 轮2：final
     s2 = AgentState(run_id=run_id, max_steps=10)
     s2.messages = messages
-    s2 = _run_turn("msg-2", s2, _ctx(reg, adapter, state=s2), p)
+    s2 = asyncio.run(_run_turn("msg-2", s2, _ctx(reg, adapter, state=s2), p))
     p.close()
 
     # 轮2 的 messages 含轮1 的 assistant + tool_result（跨轮不丢）

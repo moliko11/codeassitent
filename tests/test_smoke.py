@@ -12,6 +12,7 @@
 """
 
 import json
+import asyncio
 import pytest
 from agent.agentloop import agentloop
 from agent.runtime import RuntimeContext
@@ -39,7 +40,7 @@ class _ScriptedAdapter(BaseModelAdapter):
         self.n = 0
         self.tool_rounds = tool_rounds
 
-    def call_llm(self, request):
+    async def call_llm(self, request):
         self.n += 1
         if self.n <= self.tool_rounds:
             return ModelResponse(
@@ -76,7 +77,7 @@ def _run_agent(tool_rounds=2) -> AgentState:
         config=AgentConfig(max_steps=5),
         state=AgentState(),
     )
-    return agentloop("hi", ctx)
+    return asyncio.run(agentloop("hi", ctx))
 
 
 def test_multi_step_loop_completes():
