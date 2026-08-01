@@ -26,10 +26,10 @@ class BaseModelAdapter(ABC):
         self.model = model
 
     @abstractmethod
-    def call_llm(self, request: ModelRequest) -> ModelResponse:
+    async def call_llm(self, request: ModelRequest) -> ModelResponse:
         """ModelRequest(统一) -> provider请求 -> 调API -> ModelResponse(统一)"""
 
-    def stream_llm(self, request: ModelRequest, sink: EventSink) -> ModelResponse:
+    async def stream_llm(self, request: ModelRequest, sink: EventSink) -> ModelResponse:
         """流式调用 LLM：边收边把增量事件推给 sink，返回累积好的 ModelResponse。
 
         默认实现：退化为阻塞 call_llm，再把整包拆成事件一次性推给 sink。
@@ -38,7 +38,7 @@ class BaseModelAdapter(ABC):
         兼容性关键：不支持流式的 provider 与测试 mock 只需实现 call_llm，
         即可自动获得本方法 -> 流式对它们透明（只是「一次吐整段」而非逐 token）。
         """
-        resp = self.call_llm(request)
+        resp = await self.call_llm(request)
         if resp.text:
             sink.emit(TextDelta(text=resp.text))
         for i, tc in enumerate(resp.tool_calls):

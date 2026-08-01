@@ -2,7 +2,7 @@
 import json
 from typing import Any
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from ..core.messages import Message
 from ..core.models import ModelRequest, ModelResponse, TokenUsage
@@ -29,9 +29,9 @@ class ArkAdapter(BaseModelAdapter):
     def __init__(self, api_key: str, base_url: str, model: str):
         super().__init__(api_key, base_url, model)
         # base_url 形如 https://ark.cn-beijing.volces.com/api/v3
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
 
-    def call_llm(self, request: ModelRequest) -> ModelResponse:
+    async def call_llm(self, request: ModelRequest) -> ModelResponse:
         input_items = self._to_input(request.messages)
         kwargs: dict[str, Any] = {
             "model": request.model or self.model,
@@ -47,10 +47,10 @@ class ArkAdapter(BaseModelAdapter):
             kwargs["max_output_tokens"] = request.max_tokens
         # TODO(阶段7): request.thinking_budget 透传 provider(ark thinking 参数?待真实联调确认,暂不传)
 
-        response = self.client.responses.create(**kwargs)
+        response = await self.client.responses.create(**kwargs)
         return self._from_response(response)
 
-    def stream_llm(self, request: ModelRequest, sink: EventSink) -> ModelResponse:
+    async def stream_llm(self, request: ModelRequest, sink: EventSink) -> ModelResponse:
         """Responses API 真流式：stream=True，按 event.type 分发增量事件。
 
         Ark/Responses 流式事件（用 getattr 容错不同 SDK 版本的字段名）：
@@ -77,7 +77,7 @@ class ArkAdapter(BaseModelAdapter):
         if request.max_tokens is not None:
             kwargs["max_output_tokens"] = request.max_tokens
 
-        stream = self.client.responses.create(**kwargs)
+        stream = await self.client.responses.create(**kwargs)
 
         text_parts: list[str] = []
         tool_acc: dict[str, dict[str, Any]] = {}  # item_id -> {call_id, name, args}
@@ -86,7 +86,7 @@ class ArkAdapter(BaseModelAdapter):
         stop_reason: str | None = None #
         response_id: str | None = None #
 
-        for event in stream:
+        async for event in stream:
             etype = getattr(event, "type", "")
 
             if etype == "response.output_text.delta":
