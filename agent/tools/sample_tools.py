@@ -1,5 +1,5 @@
-# 测试用工具：Tavily 联网搜索 / 按行读文件 / grep 关键词查找
-# 不追求生产级，仅用于测试 Agent 工具调用链路
+# 示例工具：Tavily 联网搜索 / 按行读文件 / grep 关键词查找
+# 不追求生产级，仅用于测试 Agent 工具调用链路（原 test_tools.py，改名避免与 tests/ 混淆）
 import os
 
 import httpx
