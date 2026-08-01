@@ -67,7 +67,7 @@ class ContextBuilder:
         self.keep_recent_turns = keep_recent_turns          # 步5:摘要时保留尾部 N 条
         self.memory_store = memory_store                    # 步6:长期记忆(None=不召回)
 
-    def build(self, state: AgentState) -> BuildResult:
+    async def build(self, state: AgentState) -> BuildResult:
         """从 state 组装发给模型的 messages。
 
         当前实现：透传 state.messages(不动)，只做计数 + budget 检查。
@@ -88,7 +88,7 @@ class ContextBuilder:
         over = budget is not None and token_count > budget
         # 步5 第5层(有损兜底):前两层压不下才摘要
         if over and self.summarizer is not None:
-            messages = auto_compact(messages, self.summarizer, self.keep_recent_turns)
+            messages = await auto_compact(messages, self.summarizer, self.keep_recent_turns)
             token_count = count_message_tokens(messages)
             over = budget is not None and token_count > budget
 

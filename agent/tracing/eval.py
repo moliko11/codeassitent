@@ -1,5 +1,6 @@
 # tracing/eval.py - Eval 框架:GoldenDataset + Evaluator + regression_eval(阶段9 任务4,题9-14)
 # 复用 _ScriptedAdapter mock 跑 dataset(不依赖真实 LLM);规则打分,LLM-as-judge 留 TODO。
+import asyncio
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -52,7 +53,7 @@ class Evaluator:
                 model_adapter=adapter, config=cfg, state=state, sink=NullSink(),
             )
             try:
-                agentloop(case.input, ctx)
+                asyncio.run(agentloop(case.input, ctx))
             except Exception:
                 pass  # 评估不因单条崩而中断
             actual_tools = [h.tool_name for h in state.tool_history]

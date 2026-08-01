@@ -24,25 +24,25 @@ class Critic:
     def __init__(self, model_adapter):
         self.adapter = model_adapter
 
-    def evaluate_result(self, task: str, result: str, criteria: str | None = None) -> Critique:
+    async def evaluate_result(self, task: str, result: str, criteria: str | None = None) -> Critique:
         user_content = (
             f"任务:{task}\n结果:{result or '(无)'}\n"
             f"完成标准:{criteria or '任务完成且结果正确'}"
         )
-        resp = self.adapter.call_llm(ModelRequest(messages=[
+        resp = await self.adapter.call_llm(ModelRequest(messages=[
             Message(role="system", content=CRITIC_PROMPT),
             Message(role="user", content=user_content),
         ]))
         return _parse_critique(resp.text or "")
 
-    def evaluate_plan(self, plan: Plan, state) -> Critique:
+    async def evaluate_plan(self, plan: Plan, state) -> Critique:
         completed = sum(1 for s in plan.steps if s.status == "completed")
         user_content = (
             f"计划:{json.dumps(plan.to_dict(), ensure_ascii=False, indent=2)}\n"
             f"进度:已完成 {completed}/{len(plan.steps)} 步\n"
             f"评估:剩余步骤是否仍合理?是否需要重新规划(needs_replan)?"
         )
-        resp = self.adapter.call_llm(ModelRequest(messages=[
+        resp = await self.adapter.call_llm(ModelRequest(messages=[
             Message(role="system", content=CRITIC_PROMPT),
             Message(role="user", content=user_content),
         ]))

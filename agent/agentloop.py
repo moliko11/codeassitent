@@ -60,7 +60,7 @@ def _init_file_history(run_id: str, persist: bool):
     _runtime_state.file_history = FileHistory(run_dir(run_id) / "file-history")
 
 
-def _run_steps(state: AgentState, context: RuntimeContext, persister, subtask: bool = False):
+async def _run_steps(state: AgentState, context: RuntimeContext, persister, subtask: bool = False):
     """Agent 主循环体（共享给 agentloop 正常 run / continue_loop 续跑 / plan_execute 子任务）。
     假设 state.messages 已初始化（正常 run 由 agentloop 初始化；resume 由 resume() 重建）。
     subtask=True(plan_execute 子任务):FINISH 时不 complete(保持 running),只设 final_response;
@@ -87,14 +87,14 @@ def _run_steps(state: AgentState, context: RuntimeContext, persister, subtask: b
 
         try:
             model_request = ModelRequest(
-                messages=builder.build(state).messages,
+                messages=(await builder.build(state)).messages,
                 tools=tools if context.config.enable_tools else [],
                 model=context.config.model,
                 temperature=context.config.temperature,
                 max_tokens=context.config.max_tokens,
             )
             step.model_request = model_request
-            model_response = context.model_adapter.stream_llm(model_request, sink)
+            model_response = await context.model_adapter.stream_llm(model_request, sink)
             step.model_response = model_response
 
             # durability-first：先落盘（decide 前，FINISH/tool_call 两路都保住付费 LLM 回复）
@@ -204,7 +204,7 @@ def _run_steps(state: AgentState, context: RuntimeContext, persister, subtask: b
         else:
             state.exceed_max_steps()
     return state
-def _run_turn(user_input: str, state: AgentState, context: RuntimeContext, persister):
+async def _run_turn(user_input: str, state: AgentState, context: RuntimeContext, persister):
     """单轮体（agentloop 与 REPL 复用）：初始化 messages + log_user + _run_steps。
     不发 RunEnd、不收尾 persister——收尾由调用方负责（agentloop 走 _end_run；REPL 走 session 级收尾）。"""
     config = context.config
@@ -221,29 +221,28 @@ def _run_turn(user_input: str, state: AgentState, context: RuntimeContext, persi
     state.messages.append(Message(role="user", content=user_input))
     if persister:
         persister.log_user(user_input)     # durability-first：先落盘再改内存
-    # 2. 主循环（抽到 _run_steps，与 continue_loop 共享）
     # 2. 按 mode 分流(阶段7):react=纯 agentic(默认);plan_execute=先规划再执行;workflow=固定 DAG(commit5)
     mode = config.mode
     if mode == "plan_execute":
-        return _run_plan_execute(user_input, state, context, persister)
+        return await _run_plan_execute(user_input, state, context, persister)
     if mode == "workflow":
-        return _run_workflow(state, context, persister)
-    return _run_steps(state, context, persister)
+        return await _run_workflow(state, context, persister)
+    return await _run_steps(state, context, persister)
 
-def _run_plan_execute(user_input: str, state: AgentState, context: RuntimeContext, persister):
+async def _run_plan_execute(user_input: str, state: AgentState, context: RuntimeContext, persister):
     """Plan-and-Execute 模式(阶段7):Planner 产 Plan -> 逐步 _run_steps(subtask=True) -> Critic 防漂移。
     messages 已由 _run_turn 初始化(system+user)。Plan 不进 messages(外置防压缩吞,靠 ContextBuilder 注入当前 step)。
     对齐 stage7-plan §3.3 subtask 轻解法:共享 state,FINISH 不 complete,steps 连续累积。"""
     config = context.config
     planner = Planner(context.model_adapter)
-    plan = planner.make_plan(user_input, context.registry)
+    plan = await planner.make_plan(user_input, context.registry)
 
     for step_idx, plan_step in enumerate(plan.steps):
         plan_step.status = "in_progress"
         plan.status = "executing"
         state.meta["current_plan_step"] = plan_step.content  # ContextBuilder 读它注入"聚焦当前子任务"
         state.step_index = 0  # 重置:每个 plan step 独占 max_steps 预算,不累加
-        _run_steps(state, context, persister, subtask=True)  # FINISH 不 complete,保持 running
+        await _run_steps(state, context, persister, subtask=True)  # FINISH 不 complete,保持 running
         result = getattr(state.final_response, "text", "") if state.final_response else ""
         plan_step.status = "completed"
         plan_step.result = result
@@ -252,20 +251,20 @@ def _run_plan_execute(user_input: str, state: AgentState, context: RuntimeContex
             content=f"[plan step 完成:{plan_step.content}]\n结果:{result}"))
         # 防漂移:每 replan_every 步调 Critic 评估计划
         if config.critic_enabled and step_idx % config.replan_every == config.replan_every - 1:
-            critique = Critic(context.model_adapter).evaluate_plan(plan, state)
+            critique = await Critic(context.model_adapter).evaluate_plan(plan, state)
             if critique.needs_replan:
-                plan = planner.make_plan(user_input, context.registry, prior=plan)
+                plan = await planner.make_plan(user_input, context.registry, prior=plan)
                 plan.status = "replanned"
 
     # 收尾:Critic 验收(可选);不通过也 complete(避免无限 replan,仅记录)
     if config.critic_enabled and state.final_response is not None:
-        Critic(context.model_adapter).evaluate_result(
+        await Critic(context.model_adapter).evaluate_result(
             user_input, getattr(state.final_response, "text", "") or "")
     state.complete(state.final_response)  # state 仍 running(subtask 未转终态),合法转 completed
     return state
 
 
-def _run_workflow(state: AgentState, context: RuntimeContext, persister):
+async def _run_workflow(state: AgentState, context: RuntimeContext, persister):
     """Workflow 模式(阶段7):固定 tool_call DAG,LLM 不参与决策,直接 execute_many 按拓扑序执行。
     复用阶段2 _dag_execute(depends_on)。Plan 从 state.meta['workflow_plan'] 读(list[ToolCall])。
     对齐 stage7-plan §3.6:react=LLM 每步决策;plan_execute=LLM 产 Plan+逐步执行;workflow=固定 DAG,LLM 不决策。"""
@@ -304,7 +303,7 @@ def _end_run(state: AgentState, sink, persister):
         persister.log_run_end(state.status, state.error)
         persister.close()
 
-def _execute_pending(state: AgentState, context: RuntimeContext, persister):
+async def _execute_pending(state: AgentState, context: RuntimeContext, persister):
     """resume 后执行 pending_tool_calls（崩在执行中的工具，per-call_id）。
     用录好的 tool_calls，不调 LLM；结果归到末尾 step（同一轮 assistant 的工具）。"""
     config = context.config
@@ -328,7 +327,7 @@ def _execute_pending(state: AgentState, context: RuntimeContext, persister):
     state.transition("running")
 
 
-def continue_loop(state: AgentState, context: RuntimeContext) -> AgentState:
+async def continue_loop(state: AgentState, context: RuntimeContext) -> AgentState:
     """resume 续跑：state.messages 已由 resume() 重建，跳过初始化。
     先执行 pending（崩在工具执行中），再进主循环。Persister 以 append 模式复用同一 transcript。"""
     sink = context.sink
@@ -337,12 +336,12 @@ def continue_loop(state: AgentState, context: RuntimeContext) -> AgentState:
     # 续跑重置步数计数：max_steps 是单轮上限，重放出的历史 steps 不该吃掉续跑预算。
     # steps 保留为历史轨迹（审计/重放），step_index 仅控制"还能跑几步"。
     state.step_index = 0
-    _execute_pending(state, context, persister)
-    state = _run_steps(state, context, persister)
+    await _execute_pending(state, context, persister)
+    state = await _run_steps(state, context, persister)
     _end_run(state, sink, persister)
     return state
 
-def agentloop(user_input: str, context: RuntimeContext) -> AgentState:
+async def agentloop(user_input: str, context: RuntimeContext) -> AgentState:
     """运行 Agent 主循环（流式版 + 可选消息级落盘）。单次调用自洽：
     自建 Persister、结束写 run_end + close。REPL 多轮复用走 _run_turn，不经过这里。"""
     config = context.config or AgentConfig()
@@ -359,7 +358,7 @@ def agentloop(user_input: str, context: RuntimeContext) -> AgentState:
     _runtime_state.workspace = context.workspace  # 阶段8:路径权限(None=退回 Path.resolve)
 
     sink.emit(RunStart(run_id=state.run_id))
-    state = _run_turn(user_input, state, context, persister)
+    state = await _run_turn(user_input, state, context, persister)
     _end_run(state, sink, persister)
     # 阶段9:run 结束聚合 Metrics(打印到 stderr)
     from .tracing.metrics import MetricsCollector
@@ -369,7 +368,7 @@ def agentloop(user_input: str, context: RuntimeContext) -> AgentState:
     return state
 
 
-def run_agent_loop(registry: ToolRegistry,
+async def run_agent_loop(registry: ToolRegistry,
                  model_adapter: BaseModelAdapter,
                  tool_executor: ToolExecutor, 
                  config: Optional[AgentConfig] = None, memory_store=None,
@@ -423,7 +422,7 @@ def run_agent_loop(registry: ToolRegistry,
             # 新 list(copy)，state.messages 会离开共享 messages 对象，故每轮结束用 messages = state.messages
             # 同步（见下），否则下一轮丢失上一轮 assistant + tool_result（bug2）。
             printer.emit(RunStart(run_id=session_run_id))
-            state = _run_turn(user_input, state, context, persister)
+            state = await _run_turn(user_input, state, context, persister)
             _emit_run_end(state, printer)   # 每轮 UI 结束提示；不 log_run_end（session 级，退出时才写）
             messages = state.messages   # 同步共享 list（append 返回 copy，state.messages 已离开原对象）
             last_state = state
@@ -465,6 +464,7 @@ def main():
 
     # 用 provider 配置里的 model（DEEPSEEK_MODEL）覆盖 AgentConfig 默认的 deepseek-v4-pro，
     # 否则 agentloop 会把 context.config.model 直接发给 API，provider 的 model 形同虚设。
-    run_agent_loop(registry, model_adapter, tool_executor, config=config)
+    import asyncio
+    asyncio.run(run_agent_loop(registry, model_adapter, tool_executor, config=config))
 if __name__ == "__main__":
     main()

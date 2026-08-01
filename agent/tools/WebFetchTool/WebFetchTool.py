@@ -66,8 +66,9 @@ def web_fetch(url, prompt):
         return {"error": "无 model_adapter(未注入),无法提取"}
     from ...core.models import ModelRequest   # 延迟 import 避免循环
     from ...core.messages import Message
-    result = adapter.call_llm(ModelRequest(messages=[
+    import asyncio
+    result = asyncio.run(adapter.call_llm(ModelRequest(messages=[
         Message(role="system", content="按 prompt 从网页内容提取,简洁回答"),
         Message(role="user", content=f"网页内容:\n{markdown[:8000]}\n\n问题:{prompt}"),
-    ]))
+    ])))
     return result.text
