@@ -61,7 +61,7 @@ def web_fetch(url, prompt):
     # 4. HTML -> text
     markdown = _html_to_text(resp.text)
     # 5. 用 model_adapter 调 LLM 提取(对标 CC small model,不复用主对话上下文)
-    adapter = _runtime_state.model_adapter
+    adapter = _runtime_state.model_adapter.get()
     if adapter is None:
         return {"error": "无 model_adapter(未注入),无法提取"}
     from ...core.models import ModelRequest   # 延迟 import 避免循环

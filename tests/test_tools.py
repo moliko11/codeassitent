@@ -499,7 +499,7 @@ def test_integration_read_edit_rewind(tmp_path):
     """集成闭环:Read -> Edit -> rewind 回原版(经 agentloop + before_mutation + make_snapshot)。"""
     a = tmp_path / "a.txt"; a.write_text("原版", encoding="utf-8")
     fh = FileHistory(tmp_path / "fh")
-    _runtime_state.file_history = fh
+    _runtime_state.file_history.set(fh)
     adapter = _ScriptedAdapter([
         ModelResponse(text=None, tool_calls=[ToolCall(call_id="c1", tool_name="read",
             arguments={"file_path": str(a)})]),
@@ -520,7 +520,7 @@ def test_integration_write_new_file_rewind_deletes(tmp_path):
     """集成闭环:Write 新文件 -> rewind -> 文件被删(null backup,经 agentloop)。"""
     a = tmp_path / "new.txt"
     fh = FileHistory(tmp_path / "fh")
-    _runtime_state.file_history = fh
+    _runtime_state.file_history.set(fh)
     adapter = _ScriptedAdapter([
         ModelResponse(text=None, tool_calls=[ToolCall(call_id="c1", tool_name="write",
             arguments={"file_path": str(a), "content": "新建内容"})]),
@@ -540,7 +540,7 @@ def test_integration_read_edit_bash_rewind(tmp_path):
     """完整闭环:Read -> Edit -> Bash 验证 -> rewind 回原版(对标 CC 自主改码 + 回滚)。"""
     a = tmp_path / "a.txt"; a.write_text("version=1", encoding="utf-8")
     fh = FileHistory(tmp_path / "fh")
-    _runtime_state.file_history = fh
+    _runtime_state.file_history.set(fh)
     adapter = _ScriptedAdapter([
         ModelResponse(text=None, tool_calls=[ToolCall(call_id="c1", tool_name="read",
             arguments={"file_path": str(a)})]),
@@ -626,7 +626,7 @@ def test_web_fetch_http_to_https(monkeypatch):
         captured["url"] = url
         return _FakeResp()
     monkeypatch.setattr(httpx, "get", fake_get)
-    _runtime_state.model_adapter = _MockAdapter()
+    _runtime_state.model_adapter.set(_MockAdapter())
     _tool("web_fetch").handler(url="http://example.com", prompt="总结")
     assert captured["url"].startswith("https://")
 
@@ -654,7 +654,7 @@ def test_web_fetch_extracts(monkeypatch):
         status_code = 200
         text = "<html><body><p>Hello world</p></body></html>"
     monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResp())
-    _runtime_state.model_adapter = _MockAdapter()
+    _runtime_state.model_adapter.set(_MockAdapter())
     r = _tool("web_fetch").handler(url="https://x.com", prompt="总结")
     assert "Hello" in r
 

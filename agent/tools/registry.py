@@ -212,16 +212,18 @@ class ToolExecutor:
         return result
 
     # tools/registry.py -- execute_many 改 generator
-    def execute_many(self, calls, timeout=None, *, cancel_event=None, user_id=None, sink=None):
+    async def execute_many(self, calls, timeout=None, *, cancel_event=None, user_id=None, sink=None):
         """并行执行多个 tool_calls，按完成序 yield。有 depends_on 时按 DAG 层级并发。
 
         sink：可选 EventSink；传入则在每个工具开始/完成时发 ToolStart/ToolEnd。
         改 yield 后结果序=完成序（无妨：tool 结果按 call_id 匹配，不依赖顺序；live 与 replay 都用完成序，一致）。
         """
         if not any(c.depends_on for c in calls):
-            yield from self._parallel(calls, timeout, cancel_event=cancel_event, user_id=user_id, sink=sink)
+            async for r in self._parallel(calls, timeout, cancel_event=cancel_event, user_id=user_id, sink=sink):
+                yield r
         else:
-            yield from self._dag_execute(calls, timeout, cancel_event=cancel_event, user_id=user_id, sink=sink)
+            async for r in self._dag_execute(calls, timeout, cancel_event=cancel_event, user_id=user_id, sink=sink):
+                yield r
 
     def _run_with_timeout(self, handler, args, timeout, cancel_event):
         """单工具超时包装。timeout=None 不限时。超时抛 ToolTimeoutError（可重试）。"""
@@ -298,51 +300,49 @@ class ToolExecutor:
                               meta={**call.meta, "via_fallback": True})
 
    # tools/registry.py -- _parallel 改 generator（删掉末尾的按序重组 return）
-    def _parallel(self, calls, timeout=None, *, cancel_event=None, user_id=None, sink=None):
-        """并行执行一组无依赖的 tool_calls，按完成序 yield。
-        streaming 层：as_completed（谁完成谁出）+ sink.emit(ToolStart/ToolEnd)。
-        ToolStart/ToolEnd 在本层发（而非 execute 内），超时杀 future 不与 execute 内事件重复。"""
-        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout, as_completed
+    async def _parallel(self, calls, timeout=None, *, cancel_event=None, user_id=None, sink=None):
+        """并行执行一组无依赖的 tool_calls，按完成序 yield(async,阶段10 Step 3)。
+        asyncio.to_thread 包同步 execute:继承 contextvar(多 subagent 隔离)。
+        streaming 层:as_completed + sink.emit(ToolStart/ToolEnd)。"""
+        import asyncio
         if not calls:
             return
         if sink:
             for c in calls:
                 sink.emit(ToolStart(
                     call_id=c.call_id, tool_name=c.tool_name, arguments=c.arguments))
-        with ThreadPoolExecutor(max_workers=min(len(calls), 8)) as pool:
-            fut_map = {pool.submit(self.execute, c, timeout=timeout,
-                                   cancel_event=cancel_event, user_id=user_id): c for c in calls}
-            for fut in as_completed(fut_map):
-                c = fut_map[fut]
-                try:
-                    r = fut.result(timeout=timeout)
-                    if sink:
-                        sink.emit(ToolEnd(
-                            call_id=r.call_id, tool_name=r.tool_name, ok=r.ok,
-                            error_type=(r.error or {}).get("type") if r.error else None,
-                            summary=_result_summary(r)))
-                    yield r
-                except FuturesTimeout:
-                    r = self._finalize(ToolResult(
-                        call_id=c.call_id, tool_name=c.tool_name, ok=False,
-                        error={"type": "StepTimeout", "message": f"工具执行超时（{timeout}s）", "retryable": True},
-                        meta=c.meta,
-                    ))
-                    if sink:
-                        sink.emit(ToolEnd(
-                            call_id=r.call_id, tool_name=r.tool_name, ok=False,
-                            error_type="StepTimeout", summary=r.error["message"]))
-                    yield r
+        sem = asyncio.Semaphore(8)
 
-    def _dag_execute(self, calls, timeout=None, *, cancel_event=None, user_id=None, sink=None):
-        """按 DAG 层级执行，每层并行、层级间串行，逐层 yield。"""
+        async def run_one(c):
+            async with sem:
+                return await asyncio.to_thread(self.execute, c, timeout=timeout,
+                                               cancel_event=cancel_event, user_id=user_id)
+
+        tasks = [asyncio.ensure_future(run_one(c)) for c in calls]
+        try:
+            for fut in asyncio.as_completed(tasks):
+                r = await fut
+                if sink:
+                    sink.emit(ToolEnd(
+                        call_id=r.call_id, tool_name=r.tool_name, ok=r.ok,
+                        error_type=(r.error or {}).get("type") if r.error else None,
+                        summary=_result_summary(r)))
+                yield r
+        except asyncio.CancelledError:
+            for t in tasks:
+                t.cancel()
+            raise
+
+    async def _dag_execute(self, calls, timeout=None, *, cancel_event=None, user_id=None, sink=None):
+        """按 DAG 层级执行，每层并行、层级间串行，逐层 yield(async)。"""
         done_ids: set[str] = set()
         remaining = list(calls)
         while remaining:
             layer = [c for c in remaining if all(d in done_ids for d in c.depends_on)]
             if not layer:
                 layer = remaining        # 有环：剩余的强制执行（防死锁）
-            yield from self._parallel(layer, timeout,
-                                      cancel_event=cancel_event, user_id=user_id, sink=sink)
+            async for r in self._parallel(layer, timeout,
+                                          cancel_event=cancel_event, user_id=user_id, sink=sink):
+                yield r
             done_ids.update(c.call_id for c in layer)
             remaining = [c for c in remaining if c.call_id not in done_ids]

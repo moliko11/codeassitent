@@ -42,13 +42,13 @@ def _track_edit_callback(call):
     无 file_path 的工具(如 Bash)跳过--命令副作用不可追踪(对标 CC 边界,靠 git)。
     file_history / current_step_id 由 _init_file_history / _run_steps 注入 _runtime_state。
     """
-    fh = _runtime_state.file_history
+    fh = _runtime_state.file_history.get()
     if fh is None:
         return
     file_path = call.arguments.get("file_path")
     if not file_path:
         return
-    fh.track_edit(file_path, _runtime_state.current_step_id)
+    fh.track_edit(file_path, _runtime_state.current_step_id.get())
 
 
 def _init_file_history(run_id: str, persist: bool):
@@ -57,7 +57,7 @@ def _init_file_history(run_id: str, persist: bool):
     if not persist:
         return
     _runtime_state.reset()
-    _runtime_state.file_history = FileHistory(run_dir(run_id) / "file-history")
+    _runtime_state.file_history.set(FileHistory(run_dir(run_id) / "file-history"))
 
 
 async def _run_steps(state: AgentState, context: RuntimeContext, persister, subtask: bool = False):
@@ -81,7 +81,7 @@ async def _run_steps(state: AgentState, context: RuntimeContext, persister, subt
 
     while state.should_continue():
         step = state.new_step()
-        _runtime_state.current_step_id = step.index   # before_mutation 回调读它做 track_edit 的 step_id
+        _runtime_state.current_step_id.set(step.index)   # before_mutation 回调读它做 track_edit 的 step_id
         sink.emit(StepStart(step_index=step.index))
         step.deadline = time.perf_counter() + config.step_timeout
 
@@ -129,7 +129,7 @@ async def _run_steps(state: AgentState, context: RuntimeContext, persister, subt
 
             # 逐 result 增量：durability-first（log-then-append），按完成序 yield
             tool_results = []
-            for r in context.tool_executor.execute_many(
+            async for r in context.tool_executor.execute_many(
                 model_response.tool_calls, timeout=config.step_timeout, sink=sink
             ):
                 # 阶段8/9 HITL:needs_approval(高风险)转 waiting_approval(暂停,续跑留 TODO)
@@ -171,8 +171,9 @@ async def _run_steps(state: AgentState, context: RuntimeContext, persister, subt
                     loop_detector.reset()
 
             # 版本链条:本轮工具执行后封口 snapshot(对标 CC makeSnapshot,每轮末)
-            if _runtime_state.file_history:
-                _runtime_state.file_history.make_snapshot(step.index)
+            _fh = _runtime_state.file_history.get()
+            if _fh:
+                _fh.make_snapshot(step.index)
             sink.emit(StepEnd(step_index=step.index))
 
         except Exception as e:
@@ -277,7 +278,7 @@ async def _run_workflow(state: AgentState, context: RuntimeContext, persister):
         state.complete(None)
         return state
     state.transition("waiting_tool")
-    for r in context.tool_executor.execute_many(calls, timeout=config.step_timeout, sink=sink):
+    async for r in context.tool_executor.execute_many(calls, timeout=config.step_timeout, sink=sink):
         if persister:
             persister.log_tool_result(r)
         state.messages = context.model_adapter.append_tool_result(state.messages, r)
@@ -316,7 +317,7 @@ async def _execute_pending(state: AgentState, context: RuntimeContext, persister
     if state.status != "running":
         state.transition("running")        # created -> running（resume 后可能仍是 created）
     state.transition("waiting_tool")
-    for r in context.tool_executor.execute_many(pending, timeout=config.step_timeout, sink=sink):
+    async for r in context.tool_executor.execute_many(pending, timeout=config.step_timeout, sink=sink):
         if persister:
             persister.log_tool_result(r)
         state.messages = context.model_adapter.append_tool_result(state.messages, r)
@@ -354,8 +355,8 @@ async def agentloop(user_input: str, context: RuntimeContext) -> AgentState:
     sink = context.sink
     persister = Persister(state.run_id) if context.persist else None
     _init_file_history(state.run_id, context.persist)   # 版本链条:按 run_id 初始化 file_history
-    _runtime_state.model_adapter = context.model_adapter   # 步3 WebFetch 用
-    _runtime_state.workspace = context.workspace  # 阶段8:路径权限(None=退回 Path.resolve)
+    _runtime_state.model_adapter.set(context.model_adapter)   # 步3 WebFetch 用
+    _runtime_state.workspace.set(context.workspace)  # 阶段8:路径权限(None=退回 Path.resolve)
 
     sink.emit(RunStart(run_id=state.run_id))
     state = await _run_turn(user_input, state, context, persister)
@@ -393,8 +394,8 @@ async def run_agent_loop(registry: ToolRegistry,
     messages: list = []               # 跨轮累积上下文（内存共享 list）
     persister = Persister(session_run_id)
     _init_file_history(session_run_id, True)   # 版本链条:REPL 持久化,按 session_run_id 初始化
-    _runtime_state.model_adapter = model_adapter   # 步3 WebFetch 用
-    _runtime_state.workspace = Workspace(root=Path.cwd())  # 阶段8:REPL 工作空间=cwd
+    _runtime_state.model_adapter.set(model_adapter)   # 步3 WebFetch 用
+    _runtime_state.workspace.set(Workspace(root=Path.cwd()))  # 阶段8:REPL 工作空间=cwd
     last_state = None
     try:
         while True:
