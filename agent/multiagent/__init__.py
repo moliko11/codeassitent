@@ -5,8 +5,10 @@ from .agent import Agent
 from .blackboard import Blackboard
 from .handoff import Handoff, detect_handoff
 from .orchestrator import OrchestratorAgent, WorkerAgent, ReviewerAgent
+from .background import run_subagent_background, launch_background_subagent
 
 __all__ = [
     "Agent", "Blackboard", "Handoff", "detect_handoff",
     "OrchestratorAgent", "WorkerAgent", "ReviewerAgent",
+    "run_subagent_background", "launch_background_subagent",
 ]

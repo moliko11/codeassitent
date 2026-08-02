@@ -426,6 +426,7 @@ async def run_agent_loop(registry: ToolRegistry,
             persist=True,
             guardrail_runner=tool_executor.guardrail_runner,  # 阶段8
             memory_store=memory_store,  # 步6:传给 builder 分层注入
+            notify_queue=notify_queue,  # commit 9:后台 subagent 通知通道
         )
         # 文本/工具进度已在运行中由 StreamingPrinter 实时流式打印。
         # _run_turn 往 state.messages append user(in-place)；但 append_assistant/tool_result 返回

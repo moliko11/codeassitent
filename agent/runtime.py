@@ -1,5 +1,6 @@
 # 运行时上下文容器：组装 Agent 一次执行所需的全部依赖
 # 单独成层，避免 messages.py 反向依赖 state / Adapter 等上层模块
+import asyncio
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -26,3 +27,4 @@ class RuntimeContext:
     memory_store: Optional[MemoryStore] = None        # 步6:长期记忆(None=不召回)
     guardrail_runner: Optional[GuardrailRunner] = None  # 阶段8:安全护栏(None=不校验)
     workspace: Optional["Workspace"] = None  # 阶段8:工作空间(None=工具退回 Path.resolve,不校验)
+    notify_queue: Optional[asyncio.Queue] = None  # 阶段10 commit 9:后台 subagent 通知通道(run_agent_loop 注入)
