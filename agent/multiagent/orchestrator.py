@@ -23,11 +23,15 @@ class OrchestratorAgent(Agent):
 
     def __init__(self, runtime: RuntimeContext, workers: list[Agent],
                  max_handoffs: int = 5, config=None):
-        # orchestrator 暂不直接调 worker 工具(tools=[]);commit 8 注册 handoff 工具后改为 ["handoff"]
-        super().__init__(role="orchestrator", tools=[],
+        # orchestrator 只 handoff,不直接调 worker 工具(allowed_tools=["handoff"],权限隔离)
+        super().__init__(role="orchestrator", tools=["handoff"],
                          config=config or runtime.config, runtime=runtime)
         self.workers: dict[str, Agent] = {w.role: w for w in workers}
         self.max_handoffs = max_handoffs
+        # 按需注册 handoff 工具(工厂,对齐 make_save_memory_tool;不全局注册避免污染单 agent)
+        if "handoff" not in runtime.registry.tools:
+            from ..tools.handoff_tool import make_handoff_tool
+            runtime.registry.register(make_handoff_tool())
 
     async def run(self, task: str, blackboard: Optional[Blackboard] = None) -> AgentState:
         blackboard = blackboard or Blackboard()
