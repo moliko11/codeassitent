@@ -18,7 +18,7 @@ GLOB_SCHEMA = {
 
 @tool(
     name="glob",
-    description="按文件名模式找文件(如 **/*.py),按 mtime 倒序(最近修改在前)。",
+    description="按文件名模式找文件(如 **/*.py),只返回路径不读内容,按 mtime 倒序。适合先摸清项目结构。",
     input_schema=GLOB_SCHEMA,
     mutates_external=False,
 )

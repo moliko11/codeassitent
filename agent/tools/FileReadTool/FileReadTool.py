@@ -21,7 +21,12 @@ READ_SCHEMA = {
 
 @tool(
     name="read",
-    description="读文本文件,返回带行号的内容(cat -n 格式)。读后记录文件状态,Edit/Write 改该文件前必须先 Read。",
+    description=(
+        "读文本文件,返回 cat -n 带行号内容。默认读全文。"
+        "大文件(>300 行)务必用 offset+limit 分段读,不要一次性加载。"
+        "已经读过的文件不要重复全量读--如需回看用 offset 精确定位行号。"
+        "读后记录文件状态,Edit/Write 改该文件前必须先 Read。"
+    ),
     input_schema=READ_SCHEMA,
     returns="str: 带行号的内容",
     mutates_external=False,
