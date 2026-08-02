@@ -150,6 +150,31 @@ def test_orchestrator_handoff_chain_and_blackboard():
     assert asyncio.run(bb.get("search")) == "找到 X"  # worker 结果回灌 blackboard
 
 
+def test_orchestrator_multi_worker_chain():
+    """多 worker 串行 handoff 链:orch -> search -> coder -> reviewer -> orch FINISH(对标 §6 验收)。
+    每轮 delegate 给不同 worker(不同 dedup_key,不触发去重),结果都写 blackboard。"""
+    script = [
+        _handoff_call("h1", "search", "搜索 X"), ModelResponse(text="orch1"),
+        ModelResponse(text="found X"),
+        _handoff_call("h2", "coder", "写代码"), ModelResponse(text="orch2"),
+        ModelResponse(text="code done"),
+        _handoff_call("h3", "reviewer", "审查"), ModelResponse(text="orch3"),
+        ModelResponse(text="review ok"),
+        ModelResponse(text="all done"),
+    ]
+    rt = _ctx(script)
+    workers = [WorkerAgent(role=r, tools=[], config=rt.config, runtime=rt)
+               for r in ("search", "coder", "reviewer")]
+    orch = OrchestratorAgent(runtime=rt, workers=workers, max_handoffs=5)
+    bb = Blackboard()
+    s = asyncio.run(orch.run("做某事", bb))
+    assert s.status == "completed"
+    assert s.final_response.text == "all done"
+    assert asyncio.run(bb.get("search")) == "found X"
+    assert asyncio.run(bb.get("coder")) == "code done"
+    assert asyncio.run(bb.get("reviewer")) == "review ok"
+
+
 def test_blackboard_async_rw():
     """Blackboard async 读写 + snapshot(空时空串)。"""
     async def run():
