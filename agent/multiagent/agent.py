@@ -10,6 +10,7 @@ from typing import Optional
 from ..core.state import AgentState
 from ..runtime import RuntimeContext
 from ..config.config import AgentConfig
+from ..tools import _runtime_state
 from .blackboard import Blackboard
 
 
@@ -18,7 +19,7 @@ class Agent:
     """一个可独立 loop 的 Agent 单元。
 
     role:   "orchestrator" / "search_worker" / "coder" / "reviewer" 等
-    tools:  allowed_tools 白名单(权限隔离,题16);空 list=全允许(默认)
+    tools:  allowed_tools 白名单(权限隔离,题16);空 list=全允许(默认,但 handoff 特权不自动放开)
     config: 该 agent 的 AgentConfig(model/mode/max_steps 等)
     runtime:复用的 RuntimeContext(共享 model_adapter/registry/tool_executor/sink)
     """
@@ -34,6 +35,9 @@ class Agent:
         返回子 AgentState(含 final_response)。不落盘(persister=None,§8.3;CC 落 subagents/ 留 TODO)。
         """
         from ..agentloop import _run_turn  # 延迟导入,避免 agentloop <-> multiagent 循环引用
+
+        # commit 10:设当前 agent role(多 Agent tracing;Tracer 把它写进 span attrs)
+        _runtime_state.agent_id.set(self.role)
 
         # 1. 子 agent 隔离:replace 出独立 runtime(共享 registry/adapter/sink,独立 config+state)
         #    config 覆盖 allowed_tools=self.tools(权限白名单);state 独立(子 AgentState,不共享父)

@@ -2,6 +2,7 @@
 
 阶段10:async 迁移后多 subagent 协程并发,scalar 改 contextvars 隔离(对标 CC AsyncLocalStorage)。
 read_file_state 仍模块级 dict(单 agent 内共享;subagent 克隆留 TODO,对齐 CC cloneFileStateCache)。
+阶段10 commit 10:加 agent_id contextvar,多 Agent tracing 用(Tracer 把它写进 span attrs)。
 """
 import contextvars
 from dataclasses import dataclass
@@ -23,6 +24,8 @@ file_history: contextvars.ContextVar = contextvars.ContextVar("file_history", de
 current_step_id: contextvars.ContextVar = contextvars.ContextVar("current_step_id", default=0)
 model_adapter: contextvars.ContextVar = contextvars.ContextVar("model_adapter", default=None)
 workspace: contextvars.ContextVar = contextvars.ContextVar("workspace", default=None)
+# commit 10:当前 agent 的 role(多 Agent tracing 用;Agent.run 设,Tracer 读进 span attrs)
+agent_id: contextvars.ContextVar = contextvars.ContextVar("agent_id", default=None)
 
 
 def reset():
@@ -32,3 +35,4 @@ def reset():
     current_step_id.set(0)
     model_adapter.set(None)
     workspace.set(None)
+    agent_id.set(None)

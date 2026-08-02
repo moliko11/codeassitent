@@ -69,7 +69,15 @@ async def _run_steps(state: AgentState, context: RuntimeContext, persister, subt
     config = context.config
     sink = context.sink
     loop_detector = LoopDetector(threshold=config.soft_stop_threshold)
-    tools = [tool.tool_spec for tool in context.registry.list_tools()]
+    all_tools = context.registry.list_tools()
+    allowed = config.allowed_tools
+    if allowed:
+        # 白名单:只给模型看 allowed_tools 内的工具(权限隔离,题16;commit 10)
+        tools = [t.tool_spec for t in all_tools if t.tool_spec.name in allowed]
+    else:
+        # 空=全允许(单 agent 默认);但 handoff 是特权工具(orchestrator 委派用),不自动放开,
+        # 防子 agent 递归调子 agent(子 agent 无权再 handoff)。单 agent 不注册 handoff,此处无影响。
+        tools = [t.tool_spec for t in all_tools if t.tool_spec.name != "handoff"]
 
      # 阶段 6：ContextBuilder(调 LLM 前组装 messages 的入口，对齐 cc query.ts:365 的管线入口)。
     # context_builder 未注入时从 config 现场构造；超 budget 只 print 到 stderr 告警，不裁剪。

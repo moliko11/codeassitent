@@ -19,7 +19,7 @@ class OrchestratorAgent(Agent):
     handoff 循环:跑一轮 -> detect_handoff 检查模型是否要 handoff ->
       要:delegate 给目标 worker,结果写 blackboard,带着 blackboard 继续原任务(下一轮)
       不要:模型 FINISH,返回
-    max_handoffs 上限防无限转交(题15);转交历史去重(同任务 A<->B 反复弹)留 commit 10。
+    防无限转交(题15):max_handoffs 硬上限 + handoff_history 去重(同 worker+子任务不重弹,commit 10)。
     """
 
     def __init__(self, runtime: RuntimeContext, workers: list[Agent],
@@ -29,6 +29,7 @@ class OrchestratorAgent(Agent):
                          config=config or runtime.config, runtime=runtime)
         self.workers: dict[str, Agent] = {w.role: w for w in workers}
         self.max_handoffs = max_handoffs
+        self.handoff_history: list[str] = []  # commit 10:防无限转交(同 worker+子任务去重)
         # 按需注册 handoff 工具(工厂,对齐 make_save_memory_tool;不全局注册避免污染单 agent)
         if "handoff" not in runtime.registry.tools:
             from ..tools.handoff_tool import make_handoff_tool
@@ -48,6 +49,11 @@ class OrchestratorAgent(Agent):
             target = self.workers.get(handoff.to_role)
             if target is None:
                 return state  # 无效 handoff 目标 -> 结束(防指向不存在的 agent)
+            # 防无限转交(题15):同 (worker, 子任务) 已 delegate 过则停(防 A<->B 反复弹 / 同任务重弹)
+            dedup_key = f"{handoff.to_role}:{handoff.context[:50]}"
+            if dedup_key in self.handoff_history:
+                return state
+            self.handoff_history.append(dedup_key)
             handoff_count += 1
             # delegate 给目标 worker,结果写 blackboard(其他 agent 下一轮可见)
             worker_state = await target.run(handoff.context, blackboard)
