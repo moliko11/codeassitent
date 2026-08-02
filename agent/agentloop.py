@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+import asyncio
 import sys
 import time
 from pathlib import Path
@@ -369,6 +370,15 @@ async def agentloop(user_input: str, context: RuntimeContext) -> AgentState:
     return state
 
 
+async def _ainput(prompt: str) -> str:
+    """input 丢线程池,不阻塞事件循环(Step 4 收尾)。
+
+    后台 subagent 是同一事件循环上的 asyncio.Task;同步 input 会霸住 loop 线程,
+    后台 subagent 既无法推进、也无法往 notify_queue put。丢进 executor 才能让 loop 继续转。"""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, input, prompt)
+
+
 async def run_agent_loop(registry: ToolRegistry,
                  model_adapter: BaseModelAdapter,
                  tool_executor: ToolExecutor, 
@@ -396,37 +406,53 @@ async def run_agent_loop(registry: ToolRegistry,
     _init_file_history(session_run_id, True)   # 版本链条:REPL 持久化,按 session_run_id 初始化
     _runtime_state.model_adapter.set(model_adapter)   # 步3 WebFetch 用
     _runtime_state.workspace.set(Workspace(root=Path.cwd()))  # 阶段8:REPL 工作空间=cwd
+    notify_queue = asyncio.Queue()  # 后台 subagent 完成通知通道(put (role, text);commit 9 注入)
     last_state = None
+
+    async def _do_turn(user_input: str) -> AgentState:
+        """跑一轮:新 state + context + _run_turn + messages 同步。REPL 输入与 notification 复用。"""
+        nonlocal messages, last_state
+        # 每轮新 state（step_index 从 0，max_steps 是单轮上限），但共用 run_id + messages
+        state = AgentState(run_id=session_run_id, max_steps=config.max_steps)
+        state.session_id = session_run_id
+        state.messages = messages     # 继承跨轮上下文（首轮空，_run_turn 加 system）
+        context = RuntimeContext(
+            registry=registry,
+            model_adapter=model_adapter,
+            tool_executor=tool_executor,
+            config=config,
+            state=state,
+            sink=CompositeSink(printer, tracer),
+            persist=True,
+            guardrail_runner=tool_executor.guardrail_runner,  # 阶段8
+            memory_store=memory_store,  # 步6:传给 builder 分层注入
+        )
+        # 文本/工具进度已在运行中由 StreamingPrinter 实时流式打印。
+        # _run_turn 往 state.messages append user(in-place)；但 append_assistant/tool_result 返回
+        # 新 list(copy)，state.messages 会离开共享 messages 对象，故每轮结束用 messages = state.messages
+        # 同步（见下），否则下一轮丢失上一轮 assistant + tool_result（bug2）。
+        printer.emit(RunStart(run_id=session_run_id))
+        state = await _run_turn(user_input, state, context, persister)
+        _emit_run_end(state, printer)   # 每轮 UI 结束提示；不 log_run_end（session 级，退出时才写）
+        messages = state.messages   # 同步共享 list（append 返回 copy，state.messages 已离开原对象）
+        last_state = state
+        return state
+
     try:
         while True:
-            user_input = input("User: ")
+            # 1. 排干后台 subagent notification(作为 user 消息注入,对标 CC messageQueueManager)。
+            #    notification 不读 input,直接进 turn 让 agent 处理后台 subagent 的结果。
+            while not notify_queue.empty():
+                role, text = notify_queue.get_nowait()
+                await _do_turn(f"[task-notification] {role} 完成:\n{text}")
+            # 2. 读用户输入(非阻塞:input 丢线程池,不卡事件循环,后台 subagent 可并发 put)。
+            #    注:notification 若在 _ainput 期间到达,下一轮迭代顶部排干时处理
+            #    (响应性留 TODO:可 race input vs notify_queue.get 提前唤醒)。
+            user_input = await _ainput("User: ")
             if user_input.lower() in ["exit", "quit"]:
                 print("Exiting agent loop.")
                 break
-            # 每轮新 state（step_index 从 0，max_steps 是单轮上限），但共用 run_id + messages
-            state = AgentState(run_id=session_run_id, max_steps=config.max_steps)
-            state.session_id = session_run_id
-            state.messages = messages     # 继承跨轮上下文（首轮空，_run_turn 加 system）
-            context = RuntimeContext(
-                registry=registry,
-                model_adapter=model_adapter,
-                tool_executor=tool_executor,
-                config=config,
-                state=state,
-                sink=CompositeSink(printer, tracer),
-                persist=True,
-                guardrail_runner=tool_executor.guardrail_runner,  # 阶段8
-                memory_store=memory_store,  # 步6:传给 builder 分层注入
-            )
-            # 文本/工具进度已在运行中由 StreamingPrinter 实时流式打印。
-            # _run_turn 往 state.messages append user(in-place)；但 append_assistant/tool_result 返回
-            # 新 list(copy)，state.messages 会离开共享 messages 对象，故每轮结束用 messages = state.messages
-            # 同步（见下），否则下一轮丢失上一轮 assistant + tool_result（bug2）。
-            printer.emit(RunStart(run_id=session_run_id))
-            state = await _run_turn(user_input, state, context, persister)
-            _emit_run_end(state, printer)   # 每轮 UI 结束提示；不 log_run_end（session 级，退出时才写）
-            messages = state.messages   # 同步共享 list（append 返回 copy，state.messages 已离开原对象）
-            last_state = state
+            await _do_turn(user_input)
         # session 正常退出：写 run_end（用最后一轮 status）；崩在 finally 前则不写 -> resume 续跑
         if last_state is not None:
             persister.log_run_end(last_state.status, last_state.error)
