@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Literal
 
 from ..prompts import DEFAULT_SYSTEM_PROMPT
@@ -23,6 +23,10 @@ class AgentConfig:
     thinking_budget: Optional[int] = None  # thinking token 预算(None=不限/provider 不支持);透传 provider,不支持的字段静默忽略
     replan_every: int = 3  # plan_execute 模式:每 N 步调 Critic 评估计划漂移
     critic_enabled: bool = True  # plan_execute 模式:是否过 Critic 验收
+    # ---- 阶段 10:多 Agent 权限隔离(题16)----
+    # 空 list=全允许(默认,兼容单 agent);PermissionGuard(stage8)读它做白名单:非空时只放行列表内工具。
+    # Agent.run 用 dataclasses.replace 把 self.tools 写进 child_config,实现 per-agent 工具隔离。
+    allowed_tools: list[str] = field(default_factory=list)
 
 
 """
