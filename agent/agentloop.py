@@ -313,6 +313,49 @@ def _end_run(state: AgentState, sink, persister):
         persister.log_run_end(state.status, state.error)
         persister.close()
 
+def _write_run_meta(state: AgentState, report, model: str):
+    """RunEnd 落盘 run_meta.json 侧车(监控 M1):列表 O(1) 读摘要,不 load trace(坑3)。
+    崩了没 RunEnd -> 不调本函数 -> 无侧车 -> list_runs 退化扫 transcript(坑2)。
+    - status 用 state(真相),不用 report.status:REPL 的 trace 无 run span(RunStart/End
+      直发 printer 绕过 tracer),report.status 会是 'unknown'。
+    - started_at 用墙钟:state.created_at 是 perf_counter(非墙钟),by_day 需真日期;
+      duration 来自 perf_counter 差(准),用 ended_at - duration 回推出墙钟 start。
+    - token 来自 report(step span attrs["usage"] 之和,坑1:LLM 返回的精确值,非估算)。"""
+    import json
+    from .persist.paths import run_meta_path
+    ended_at = time.time()
+    meta = {
+        "run_id": state.run_id,
+        "status": state.status,
+        "started_at": ended_at - (report.duration_ms or 0) / 1000.0,
+        "ended_at": ended_at,
+        "duration_ms": report.duration_ms,
+        "token_input": report.token_input,
+        "token_output": report.token_output,
+        "token_total": report.token_total,
+        "step_count": report.step_count,
+        "tool_count": report.tool_count,
+        "tool_success_rate": report.tool_success_rate,
+        "model": model,                             # 给后续 cost 用(§8 TODO)
+    }
+    run_meta_path(state.run_id).write_text(
+        json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+
+
+def _sum_step_usage(spans) -> int:
+    """sum step span 的 usage.total_tokens(坑4:total=0 用 input+output 兜底)。
+    REPL 每轮末尾打印 token 用:本轮 = 新增 span,累计 = 全部 span。"""
+    total = 0
+    for s in spans:
+        if s.type != "step":
+            continue
+        u = s.attrs.get("usage")
+        if not u:
+            continue
+        t = u.get("total_tokens", 0) or 0
+        total += t if t > 0 else (u.get("input_tokens", 0) or 0) + (u.get("output_tokens", 0) or 0)
+    return total
+
 async def _execute_pending(state: AgentState, context: RuntimeContext, persister):
     """resume 后执行 pending_tool_calls（崩在执行中的工具，per-call_id）。
     用录好的 tool_calls，不调 LLM；结果归到末尾 step（同一轮 assistant 的工具）。"""
@@ -375,6 +418,9 @@ async def agentloop(user_input: str, context: RuntimeContext) -> AgentState:
     rep = MetricsCollector().collect(tracer.trace)
     print(f"[trace] {rep.status} steps={rep.step_count} tools={rep.tool_count} "
           f"tokens={rep.token_total} tool_ok={rep.tool_success_rate:.0%}", file=sys.stderr)
+    # 监控 M1:落盘 run_meta.json 侧车(列表 O(1) 读)。persist=False 不落(测试/非持久 run)。
+    if context.persist:
+        _write_run_meta(state, rep, config.model)
     return state
 
 
@@ -441,8 +487,16 @@ async def run_agent_loop(registry: ToolRegistry,
         # 新 list(copy)，state.messages 会离开共享 messages 对象，故每轮结束用 messages = state.messages
         # 同步（见下），否则下一轮丢失上一轮 assistant + tool_result（bug2）。
         printer.emit(RunStart(run_id=session_run_id))
+        spans_before = len(tracer.trace.spans)          # 记本轮前 span 数,差出本轮新增(算本轮 token)
         state = await _run_turn(user_input, state, context, persister)
         _emit_run_end(state, printer)   # 每轮 UI 结束提示；不 log_run_end（session 级，退出时才写）
+        # 每轮末尾:聚合 Metrics(会话级累计)+ 打印 token + 增量落盘 run_meta
+        # 增量写:每轮结束就落盘(累计),崩在下一轮前也保留到最近完成的轮(用户要求,不依赖 exit)
+        from .tracing.metrics import MetricsCollector
+        rep = MetricsCollector().collect(tracer.trace)
+        turn_tk = _sum_step_usage(tracer.trace.spans[spans_before:])
+        print(f"  [本轮 {turn_tk} / 累计 {rep.token_total} tokens]")
+        _write_run_meta(state, rep, config.model)
         messages = state.messages   # 同步共享 list（append 返回 copy，state.messages 已离开原对象）
         last_state = state
         return state
@@ -465,7 +519,7 @@ async def run_agent_loop(registry: ToolRegistry,
         # session 正常退出：写 run_end（用最后一轮 status）；崩在 finally 前则不写 -> resume 续跑
         if last_state is not None:
             persister.log_run_end(last_state.status, last_state.error)
-        # 阶段9:session 退出聚合 Metrics
+        # 阶段9:session 退出聚合 Metrics(run_meta 已在每轮 _do_turn 增量落盘,这里只打印)
         from .tracing.metrics import MetricsCollector
         rep = MetricsCollector().collect(tracer.trace)
         print(f"[trace] session {rep.status} steps={rep.step_count} tools={rep.tool_count} "
