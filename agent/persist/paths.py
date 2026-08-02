@@ -18,6 +18,12 @@ def trace_path(run_id: str) -> Path:
     return run_dir(run_id) / "trace.jsonl"
 
 
+def run_meta_path(run_id: str) -> Path:
+    """run_meta.json 侧车(监控 M1 用):RunEnd 落盘摘要,列表 O(1) 读不 load trace(坑3)。
+    和 transcript/trace 同 run_id 同目录。"""
+    return run_dir(run_id) / "run_meta.json"
+
+
 def tool_results_dir(run_id: str) -> Path:
     """工具结果落盘子目录(步3 ToolResultBudget 用)。不 mkdir,由调用方按需建。"""
     return run_dir(run_id) / "tool-results"
