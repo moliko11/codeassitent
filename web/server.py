@@ -17,9 +17,33 @@ from agent.persist.store import _scan_transcript_tail
 from agent.tracing.store import TraceStore
 from agent.tracing.aggregate import aggregate_stats
 from agent.tracing.feedback import FeedbackStore
+from agent.config.config import AgentConfig
 
 app = FastAPI(title="ez-interview 监控后台")
 _TEMPLATES = Path(__file__).parent / "templates"
+
+
+def _split_sections(text: str) -> dict:
+    """把系统提示词按 ## 标题分层:返回 {intro, sections:[{title,body}]}。
+    首段(首个 ## 之前)作 intro;每个 `## 标题` 起一段。"""
+    intro: list[str] = []
+    sections: list[dict] = []
+    cur: dict | None = None
+    for line in text.split("\n"):
+        if line.startswith("## "):
+            if cur is not None:
+                sections.append(cur)
+            cur = {"title": line[3:].strip(), "body": []}
+        elif cur is None:
+            intro.append(line)
+        else:
+            cur["body"].append(line)
+    if cur is not None:
+        sections.append(cur)
+    return {
+        "intro": "\n".join(intro).strip(),
+        "sections": [{"title": s["title"], "body": "\n".join(s["body"]).strip()} for s in sections],
+    }
 
 
 def _read_run_meta(run_id: str) -> dict | None:
@@ -92,6 +116,16 @@ def api_run_transcript(run_id: str, limit: int = Query(50, ge=1, le=1000)):
 def api_feedback():
     """反馈按 variant 聚合(👍率)。"""
     return FeedbackStore().aggregate()
+
+
+@app.get("/api/system_prompt")
+def api_system_prompt():
+    """首轮加载的系统提示词,按 ## 标题分层(intro + sections + raw)。
+    源:AgentConfig().system_prompt(REPL 用默认配置,main 不覆盖即 DEFAULT_SYSTEM_PROMPT)。"""
+    prompt = AgentConfig().system_prompt
+    d = _split_sections(prompt)
+    d["raw"] = prompt
+    return d
 
 
 if __name__ == "__main__":

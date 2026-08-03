@@ -148,3 +148,17 @@ def test_index_html():
     r = client.get("/")
     assert r.status_code == 200
     assert "监控" in r.text and "dashboard" in r.text.lower()
+
+
+def test_api_system_prompt():
+    """GET /api/system_prompt -> 按 ## 标题分层(intro + sections + raw)。"""
+    d = client.get("/api/system_prompt").json()
+    assert d["intro"]                                    # 引言非空
+    assert len(d["sections"]) >= 8                       # 至少 8 个 ## 段(实际 9)
+    titles = [s["title"] for s in d["sections"]]
+    assert any("终止约定" in t for t in titles)
+    assert any("工具使用原则" in t for t in titles)
+    assert any("记忆系统" in t for t in titles)
+    assert d["raw"] and "## " in d["raw"]               # 原文含 ## 标记
+    # 段体非空
+    assert all(s["body"] for s in d["sections"])

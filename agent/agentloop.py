@@ -384,19 +384,23 @@ def _write_run_meta(state: AgentState, report, model: str):
         json.dumps(meta, ensure_ascii=False), encoding="utf-8")
 
 
-def _sum_step_usage(spans) -> int:
-    """sum step span 的 usage.total_tokens(坑4:total=0 用 input+output 兜底)。
+def _sum_step_usage(spans) -> tuple[int, int, int]:
+    """sum step span 的 usage,返回 (input, output, total)。total=0 用 input+output 兜底(坑4)。
     REPL 每轮末尾打印 token 用:本轮 = 新增 span,累计 = 全部 span。"""
-    total = 0
+    ti = to = tt = 0
     for s in spans:
         if s.type != "step":
             continue
         u = s.attrs.get("usage")
         if not u:
             continue
+        i = u.get("input_tokens", 0) or 0
+        o = u.get("output_tokens", 0) or 0
         t = u.get("total_tokens", 0) or 0
-        total += t if t > 0 else (u.get("input_tokens", 0) or 0) + (u.get("output_tokens", 0) or 0)
-    return total
+        ti += i
+        to += o
+        tt += t if t > 0 else i + o
+    return ti, to, tt
 
 async def _execute_pending(state: AgentState, context: RuntimeContext, persister):
     """resume 后执行 pending_tool_calls（崩在执行中的工具，per-call_id）。
@@ -536,8 +540,8 @@ async def run_agent_loop(registry: ToolRegistry,
         # 增量写:每轮结束就落盘(累计),崩在下一轮前也保留到最近完成的轮(用户要求,不依赖 exit)
         from .tracing.metrics import MetricsCollector
         rep = MetricsCollector().collect(tracer.trace)
-        turn_tk = _sum_step_usage(tracer.trace.spans[spans_before:])
-        print(f"  [本轮 {turn_tk} / 累计 {rep.token_total} tokens]")
+        turn_in, turn_out, _ = _sum_step_usage(tracer.trace.spans[spans_before:])
+        print(f"  [本轮 in:{turn_in} out:{turn_out} / 累计 in:{rep.token_input} out:{rep.token_output} tokens]")
         _write_run_meta(state, rep, config.model)
         messages = state.messages   # 同步共享 list（append 返回 copy，state.messages 已离开原对象）
         last_state = state
