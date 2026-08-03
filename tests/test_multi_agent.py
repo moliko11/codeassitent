@@ -314,6 +314,37 @@ def test_tracing_span_agent_id():
 
 # ---- 测试:detect_handoff 多适配器格式(commit 8)----
 
+# ---- 测试:Task 工具(主 agent 派子 agent,CC 小弟模型)----
+
+def test_task_tool_subagent():
+    """Task 工具:主 agent 调 task -> 子 agent 跑子任务 -> 结果回填 tool result -> 主 agent FINISH。
+
+    验证 CC 小弟模型:主 agent 调 task 工具,_run_steps 拦截 __subagent__ 标记 -> 异步跑子 agent
+    (复用 Agent.run)-> 子 agent 的最终回答作为 task 工具结果回填 -> 主 agent 据此 FINISH。
+    """
+    from agent.agentloop import _run_turn
+    from agent.tools.task_tool import make_task_tool
+    reg = ToolRegistry()
+    reg.register(make_task_tool())
+    # 脚本(共享 adapter,按调用序):主 agent 调 task -> 子 agent FINISH -> 主 agent FINISH
+    script = [
+        ModelResponse(tool_calls=[ToolCall(call_id="t1", tool_name="task",
+            arguments={"description": "查 X", "prompt": "调查 X 是什么"})]),
+        ModelResponse(text="X 是某个东西"),  # 子 agent FINISH
+        ModelResponse(text="基于子 agent: X 是某个东西"),  # 主 agent FINISH
+    ]
+    state = AgentState()
+    ctx = RuntimeContext(registry=reg, tool_executor=ToolExecutor(reg),
+        model_adapter=_ScriptAdapter(script), config=AgentConfig(max_steps=5), state=state)
+    s = asyncio.run(_run_turn("查一下 X", state, ctx, persister=None))
+    assert s.status == "completed"
+    assert "X 是某个东西" in (s.final_response.text or "")
+    # 子 agent 结果作为 task 工具结果回填到 messages
+    tool_msgs = [m for m in s.messages if getattr(m, "role", None) == "tool"]
+    assert any("X 是某个东西" in (m.content if isinstance(m.content, str) else str(m.content))
+               for m in tool_msgs), "子 agent 结果未回填"
+
+
 def test_detect_handoff_multi_adapter():
     """detect_handoff 兼容 mock(str)/openai_compat(dict['content'])/ark(dict['output']) 三种格式。"""
     def hj(role, ctx):

@@ -27,6 +27,7 @@ from .core.models import ModelRequest
 from .core.messages import Message
 from .runtime import RuntimeContext
 from .tools.registry import ToolExecutor, ToolRegistry
+from .tools.defs import ToolResult
 from .streaming.events import RunStart, StepStart, StepEnd, RunEnd
 # agentloop.py -- import 区加一行
 from .persist.persister import Persister
@@ -141,6 +142,10 @@ async def _run_steps(state: AgentState, context: RuntimeContext, persister, subt
             async for r in context.tool_executor.execute_many(
                 model_response.tool_calls, timeout=config.step_timeout, sink=sink
             ):
+                # Task 工具:拦截 subagent 请求(handler 同步跑不了 async agent.run),
+                # 异步跑子 agent 用其结果替换 tool result(对标 NeedsApproval 的拦截模式)
+                if r.ok and isinstance(r.data, dict) and r.data.get("__subagent__"):
+                    r = await _run_subagent(r, context)
                 # 阶段8/9 HITL:needs_approval(高风险)转 waiting_approval(暂停,续跑留 TODO)
                 # needs_approval 通过 ToolEnd(error_type=NeedsApproval)进 trace,Tracer 自动捕获
                 if r.error and r.error.get("type") == "NeedsApproval":
@@ -214,6 +219,28 @@ async def _run_steps(state: AgentState, context: RuntimeContext, persister, subt
         else:
             state.exceed_max_steps()
     return state
+
+
+async def _run_subagent(request, context: RuntimeContext) -> ToolResult:
+    """跑一个子 agent 处理 Task 工具的子任务,返回其最终回答作为 ToolResult(对标 CC Task 工具)。
+
+    handler 同步跑不了 async agent.run,故 Task 工具 handler 只返回请求标记,_run_steps 拦截后
+    调本函数异步跑子 agent。复用 multiagent.Agent.run(克隆 context + agent_id tracing);
+    子 agent fresh state(不继承父 messages,聚焦子任务),tools=全允许(除 handoff,可嵌套 Task)。
+    """
+    from dataclasses import replace
+    from .multiagent.agent import Agent
+    prompt = request.data["prompt"]
+    # fresh runtime(空 state)-> 子 agent 不继承父 messages,只看自己的 prompt(对标 CC 子 agent 隔离)
+    fresh_runtime = replace(context, state=AgentState())
+    sub_agent = Agent(role="subagent", tools=[], config=context.config, runtime=fresh_runtime)
+    sub_state = await sub_agent.run(prompt)
+    text = getattr(sub_state.final_response, "text", "") if sub_state.final_response else ""
+    return ToolResult(call_id=request.call_id, tool_name="task", ok=True,
+                      data={"description": request.data.get("description", ""), "result": text},
+                      text=text, meta=request.meta)
+
+
 async def _run_turn(user_input: str, state: AgentState, context: RuntimeContext, persister):
     """单轮体（agentloop 与 REPL 复用）：初始化 messages + log_user + _run_steps。
     不发 RunEnd、不收尾 persister——收尾由调用方负责（agentloop 走 _end_run；REPL 走 session 级收尾）。"""
@@ -549,8 +576,10 @@ def main():
     from .memory import MemoryStore
     from .persist.paths import memory_dir
     from .tools.memory_tool import make_save_memory_tool
+    from .tools.task_tool import make_task_tool
     memory_store = MemoryStore(memory_dir())
     registry.register(make_save_memory_tool(memory_store))
+    registry.register(make_task_tool())  # 阶段10:Task 工具(主 agent 派子 agent,CC 小弟模型)
 
     # 用 provider 配置里的 model（DEEPSEEK_MODEL）覆盖 AgentConfig 默认的 deepseek-v4-pro，
     # 否则 agentloop 会把 context.config.model 直接发给 API，provider 的 model 形同虚设。
