@@ -116,6 +116,7 @@ def run_task(name, max_steps=12):
         "gold_file": gold["file"], "gold_func": gold.get("function", ""),
         "replace_correct": func_correct,
         "tools_used": tools_used, "steps": len(state.steps),
+        "tool_calls": [(tc.tool_name, tc.arguments) for s in state.steps if s.model_response for tc in (s.model_response.tool_calls or [])],
         "final": (state.final_response.text or "")[:200] if state.final_response else "",
         "pytest_tail": pytest_out[-200:] if isinstance(pytest_out, str) else "",
     }
@@ -133,6 +134,7 @@ def main():
         rs.append(r)
         print(f"{r['task']:<20}{str(r['search_hit']):>8}{str(r['replace_correct']):>9}"
               f"{r['steps']:>7}{r['status']:>11}  {r['changed_files']}")
+        print('    tool_calls:', r['tool_calls'])
         if not r['replace_correct']:
             print("  pytest: " + r['pytest_tail'][-150:].replace("\n", " | "))
     print("-" * 88)
