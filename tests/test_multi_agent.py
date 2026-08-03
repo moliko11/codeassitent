@@ -345,6 +345,32 @@ def test_task_tool_subagent():
                for m in tool_msgs), "子 agent 结果未回填"
 
 
+def test_task_tool_background():
+    """Task 工具 background=true:主 agent 不阻塞,立即拿"已派出";子 agent 后台跑完 -> notify_queue 通知。"""
+    from agent.agentloop import _run_subagent
+    from agent.tools.defs import ToolResult
+
+    async def run():
+        q: asyncio.Queue = asyncio.Queue()
+        reg = ToolRegistry()
+        # 子 agent 用这个 adapter(返回固定结果);主 agent 不调 adapter(直接调 _run_subagent)
+        adapter = _ScriptAdapter([ModelResponse(text="subagent result")])
+        ctx = RuntimeContext(registry=reg, tool_executor=ToolExecutor(reg),
+            model_adapter=adapter, config=AgentConfig(max_steps=5), state=AgentState(),
+            notify_queue=q)
+        request = ToolResult(call_id="t1", tool_name="task", ok=True,
+            data={"__subagent__": True, "description": "查 X", "prompt": "调查 X", "background": True})
+        # _run_subagent 应立即返回"已派出"(不阻塞等子 agent)
+        r = await _run_subagent(request, ctx)
+        assert "已后台派出" in (r.text or ""), r.text
+        # 主 agent 没等;子 agent 后台跑完 -> notify_queue 收到(await q.get 期间子 agent 在 loop 上跑)
+        role, text = await q.get()
+        assert role == "subagent"
+        assert text == "subagent result"
+
+    asyncio.run(run())
+
+
 def test_detect_handoff_multi_adapter():
     """detect_handoff 兼容 mock(str)/openai_compat(dict['content'])/ark(dict['output']) 三种格式。"""
     def hj(role, ctx):

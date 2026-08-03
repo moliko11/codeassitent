@@ -227,13 +227,28 @@ async def _run_subagent(request, context: RuntimeContext) -> ToolResult:
     handler 同步跑不了 async agent.run,故 Task 工具 handler 只返回请求标记,_run_steps 拦截后
     调本函数异步跑子 agent。复用 multiagent.Agent.run(克隆 context + agent_id tracing);
     子 agent fresh state(不继承父 messages,聚焦子任务),tools=全允许(除 handoff,可嵌套 Task)。
+    background=True(且 notify_queue 可用):fire-and-forget,立即返回"已派出",子 agent 完成后
+    经 notify_queue -> [task-notification] 下轮注入(主 agent 不阻塞,继续做别的)。默认前台阻塞。
     """
     from dataclasses import replace
     from .multiagent.agent import Agent
     prompt = request.data["prompt"]
+    background = request.data.get("background", False)
     # fresh runtime(空 state)-> 子 agent 不继承父 messages,只看自己的 prompt(对标 CC 子 agent 隔离)
     fresh_runtime = replace(context, state=AgentState())
     sub_agent = Agent(role="subagent", tools=[], config=context.config, runtime=fresh_runtime)
+
+    if background and context.notify_queue is not None:
+        # 后台:fire-and-forget,主 agent 立即继续做别的;子 agent 完成后 notify_queue.put
+        # -> run_agent_loop 排干 -> 下轮 [task-notification] 注入(对标 CC Task background)
+        from .multiagent.background import launch_background_subagent
+        launch_background_subagent(sub_agent, prompt, context.notify_queue)
+        return ToolResult(call_id=request.call_id, tool_name="task", ok=True,
+                          data={"description": request.data.get("description", ""), "background": True},
+                          text="子 agent 已后台派出,完成时会以 [task-notification] 通知主 agent(主 agent 可继续做别的)。",
+                          meta=request.meta)
+
+    # 前台(默认):阻塞等子 agent 跑完,结果作为 tool result 当场返回
     sub_state = await sub_agent.run(prompt)
     text = getattr(sub_state.final_response, "text", "") if sub_state.final_response else ""
     return ToolResult(call_id=request.call_id, tool_name="task", ok=True,

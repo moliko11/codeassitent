@@ -10,6 +10,10 @@ import asyncio
 from .agent import Agent
 
 
+# 持强引用防 fire-and-forget Task 被 GC 取消(asyncio 已知坑:create_task 返回的 Task 不持引用会被回收)
+_background_tasks: set = set()
+
+
 async def run_subagent_background(agent: Agent, task: str, notify_queue: asyncio.Queue) -> None:
     """跑一个 subagent,完成时把 (role, final_text) put 到 notify_queue。
 
@@ -27,4 +31,7 @@ def launch_background_subagent(agent: Agent, task: str, notify_queue: asyncio.Qu
     完成时 run_subagent_background 往 notify_queue put (role, text),主循环排干时注入下轮。
     Task 在当前 context 的 copy 里跑(contextvar 隔离,Step 5)。
     """
-    return asyncio.create_task(run_subagent_background(agent, task, notify_queue))
+    t = asyncio.create_task(run_subagent_background(agent, task, notify_queue))
+    _background_tasks.add(t)            # 持强引用防 GC(asyncio Task 不持引用会被回收/取消)
+    t.add_done_callback(_background_tasks.discard)
+    return t
