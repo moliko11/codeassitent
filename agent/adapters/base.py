@@ -20,6 +20,27 @@ class BaseModelAdapter(ABC):
 
     provider: str = ""
 
+    @staticmethod
+    def _extract_cached_tokens(u) -> int:
+        """从 provider usage 对象提取 cached_tokens(各厂字段名不同,兼容取)。
+        DeepSeek: prompt_cache_hit_tokens;OpenAI Chat: prompt_tokens_details.cached_tokens;
+        豆包/Responses API: input_tokens_details.cached_tokens;其他: 顶层 cached_tokens。无则返 0。
+        注:cached 是 input 的子集(命中的缓存输入),命中率 = cached / input_tokens。"""
+        v = getattr(u, "prompt_cache_hit_tokens", None)       # DeepSeek
+        if v:
+            return int(v)
+        # OpenAI Chat: prompt_tokens_details;豆包/Responses: input_tokens_details(同结构,字段名不同)
+        for detail_attr in ("prompt_tokens_details", "input_tokens_details"):
+            pd = getattr(u, detail_attr, None)
+            if pd is not None:
+                v = getattr(pd, "cached_tokens", None)
+                if v:
+                    return int(v)
+        v = getattr(u, "cached_tokens", None)                 # 顶层(部分 provider)
+        if v:
+            return int(v)
+        return 0
+
     def __init__(self, api_key: str, base_url: str, model: str):
         self.api_key = api_key
         self.base_url = base_url

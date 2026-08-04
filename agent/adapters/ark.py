@@ -150,6 +150,7 @@ class ArkAdapter(BaseModelAdapter):
                             input_tokens=getattr(u, "input_tokens", 0) or 0,
                             output_tokens=getattr(u, "output_tokens", 0) or 0,
                             total_tokens=getattr(u, "total_tokens", 0) or 0,
+                            cached_tokens=self._extract_cached_tokens(u),
                         )
 
         # 收尾：对未收到 done 事件的 tool_call 补发 ToolCallEnd
@@ -260,6 +261,7 @@ class ArkAdapter(BaseModelAdapter):
                 input_tokens=getattr(u, "input_tokens", 0) or 0,
                 output_tokens=getattr(u, "output_tokens", 0) or 0,
                 total_tokens=getattr(u, "total_tokens", 0) or 0,
+                cached_tokens=self._extract_cached_tokens(u),
             )
 
         return ModelResponse(

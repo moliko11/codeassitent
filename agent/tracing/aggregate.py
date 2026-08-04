@@ -19,6 +19,8 @@ class AggregateStats:
     total_token_input: int = 0
     total_token_output: int = 0
     total_token: int = 0
+    total_token_cached: int = 0          # 缓存命中 token 合计(input 子集)
+    avg_cache_hit_rate: float = 0.0      # 平均缓存命中率 = total_cached / total_input
     avg_tool_success_rate: float = 0.0
     total_cost: float = 0.0          # TODO(§8),本期恒 0
     by_day: dict = field(default_factory=dict)    # {date: {token, runs}}
@@ -53,6 +55,7 @@ def aggregate_stats(runs: list[dict]) -> AggregateStats:
         s.total_token_input += r.get("token_input", 0) or 0
         s.total_token_output += r.get("token_output", 0) or 0
         s.total_token += _total_with_fallback(r)
+        s.total_token_cached += r.get("token_cached", 0) or 0
         rates.append(r.get("tool_success_rate", 0) or 0)
         day = _day_of(r.get("started_at"))
         d = s.by_day.setdefault(day, {"token": 0, "runs": 0})
@@ -62,4 +65,5 @@ def aggregate_stats(runs: list[dict]) -> AggregateStats:
         m["token"] += _total_with_fallback(r)
         m["runs"] += 1
     s.avg_tool_success_rate = (sum(rates) / len(rates)) if rates else 0.0
+    s.avg_cache_hit_rate = (s.total_token_cached / s.total_token_input) if s.total_token_input else 0.0
     return s

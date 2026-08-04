@@ -44,11 +44,24 @@ function esc(s){ return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&l
 function badge(status){ return `<span class="badge b-${esc(status)}">${esc(status)}</span>`; }
 function fmtTs(ts){ if(!ts||ts<=0) return '-'; const d=new Date(ts*1000); return isNaN(d)? '-' : d.toLocaleString(); }
 function fmtDur(ms){ if(!ms&&ms!==0) return '-'; if(ms<1000) return Math.round(ms)+'ms'; return (ms/1000).toFixed(1)+'s'; }
+function _rate(c, i){ return i ? Math.round(c*100/i)+'%' : '-'; }
+function pre(s){ return `<pre style="white-space:pre-wrap;margin:6px 0 0;font-size:12px;font-family:ui-monospace,Consolas,monospace;line-height:1.5">${esc(s)}</pre>`; }
+function splitSections(text){
+  const intro=[], sections=[]; let cur=null;
+  for(const line of (text||'').split('\n')){
+    if(line.startsWith('## ')){ if(cur) sections.push(cur); cur={title:line.slice(3).trim(),body:[]}; }
+    else if(cur===null) intro.push(line);
+    else cur.body.push(line);
+  }
+  if(cur) sections.push(cur);
+  return {intro: intro.join('\n').trim(), sections: sections.map(s=>({title:s.title,body:s.body.join('\n').trim()}))};
+}
 
 async function dashboard(){
   const [stats, runs] = await Promise.all([get('/api/stats'), get('/api/runs')]);
   const cards = [
     ['总输入', stats.total_token_input], ['总输出', stats.total_token_output], ['总 token', stats.total_token],
+    ['总缓存', stats.total_token_cached], ['平均命中率', (stats.avg_cache_hit_rate*100).toFixed(0)+'%'],
     ['Run 数', stats.run_count], ['平均成功率', (stats.avg_tool_success_rate*100).toFixed(0)+'%'],
   ];
   const byModel = Object.entries(stats.by_model||{}).map(([m,v])=>`${esc(m)}: ${v.token}tok/${v.runs}run`).join(' · ');
@@ -90,6 +103,11 @@ async function runDetail(runId){
   const repExtra = rep ? `
     <dt>平均 latency</dt><dd>${fmtDur(rep.avg_tool_latency_ms)}</dd>
     <dt>超时 / 重试</dt><dd>${rep.timeout_count} / ${rep.retry_count}</dd>` : '<dt>trace 详情</dt><dd class=dim>无 trace(REPL run 无 trace.jsonl,仅 run_meta 摘要)</dd>';
+  // 本会话系统提示词(按 run 存,分层展示)
+  const sp = splitSections(meta.system_prompt||'');
+  const spHtml = sp.sections.length ? `<details style="margin-top:14px"><summary style="cursor:pointer;font-weight:600;color:#333">📝 本会话系统提示词(${sp.sections.length} 段)</summary>
+      <div class="card" style="background:#fffbe6;border-left:3px solid #f59e0b;margin-top:8px"><div class="l" style="font-weight:600">引言</div>${pre(sp.intro)}</div>
+      <div style="display:flex;flex-direction:column;gap:8px;margin-top:8px">${sp.sections.map((s,i)=>`<div class="card" style="border-left:3px solid #6366f1"><div class="l" style="font-weight:600">${i+1}. ${esc(s.title)}</div>${pre(s.body)}</div>`).join('')}</div></details>` : '<div class=dim style="margin-top:14px">无系统提示词(旧 run 无此字段)</div>';
   // transcript 末尾片段(再发一个请求,避免详情页阻塞)
   let tHtml = '<div class="dim">加载中…</div>';
   app().innerHTML = `
@@ -98,19 +116,30 @@ async function runDetail(runId){
     <dl class="meta-grid">
       <dt>状态 / model</dt><dd>${badge(meta.status)} ${esc(meta.model)}</dd>
       <dt>耗时 / 开始</dt><dd>${fmtDur(meta.duration_ms)} · ${fmtTs(meta.started_at)}</dd>
-      <dt>token (入/出/总)</dt><dd>${meta.token_input} / ${meta.token_output} / ${meta.token_total}</dd>
+      <dt>token (入/出/缓存/总)</dt><dd>${meta.token_input} / ${meta.token_output} / ${meta.token_cached}(${_rate(meta.token_cached, meta.token_input)}) / ${meta.token_total}</dd>
       <dt>steps / tools</dt><dd>${meta.step_count} / ${meta.tool_count}</dd>
       <dt>成功率</dt><dd>${(meta.tool_success_rate*100).toFixed(0)}%</dd>
       ${repExtra}
     </dl>
     <h2>火焰图(span 树,宽∝耗时)</h2>${flame}
-    <h2>消息流(末尾)</h2><div class="msg" id="tbox">${tHtml}</div>`;
+    <h2>消息流(末尾)</h2><div class="msg" id="tbox">${tHtml}</div>
+    ${spHtml}`;
   try {
     const recs = await get('/api/runs/'+encodeURIComponent(runId)+'/transcript?limit=30');
     tHtml = recs.map(r=>{
       if(r.type==='user') return `<div><b>user:</b> ${esc(r.content)}</div>`;
-      if(r.type==='assistant') return `<div><b>assistant:</b> ${esc(r.text)}</div>`;
-      if(r.type==='tool_result') return `<div class=dim><b>tool_result:</b> ${esc((r.result||{}).tool_name||'')} ok=${esc((r.result||{}).ok)}</div>`;
+      if(r.type==='assistant'){
+        const tcs = (r.tool_calls||[]).map(tc=>{
+          const args = tc.arguments ? JSON.stringify(tc.arguments) : '';
+          return `<div class=dim>  ⏺ ${esc(tc.tool_name||'')}(<span style="color:#6366f1">${esc(args)}</span>)</div>`;
+        }).join('');
+        return `<div><b>assistant:</b> ${esc(r.text||'(仅工具调用)')}</div>${tcs}`;
+      }
+      if(r.type==='tool_result'){
+        const res = r.result||{};
+        const summ = res.text || (res.data ? JSON.stringify(res.data) : '');
+        return `<div class=dim>  ⎿ ${esc(res.tool_name||'')} ${res.ok?'✓':'✗'} ${esc(summ).slice(0,100)}</div>`;
+      }
       if(r.type==='run_end') return `<div class=dim><b>run_end:</b> ${esc(r.status)}</div>`;
       return '';
     }).join('') || '<div class=dim>无消息</div>';
@@ -120,7 +149,6 @@ async function runDetail(runId){
 
 async function promptView(){
   const d = await get('/api/system_prompt');
-  const pre = s=>`<pre style="white-space:pre-wrap;margin:6px 0 0;font-size:12px;font-family:ui-monospace,Consolas,monospace;line-height:1.5">${esc(s)}</pre>`;
   const secs = d.sections.map((s,i)=>`<div class="card" style="min-width:300px;max-width:780px;border-left:3px solid #6366f1">
     <div class="l" style="font-weight:600;color:#333">${i+1}. ${esc(s.title)}</div>${pre(s.body)}</div>`).join('');
   app().innerHTML = `

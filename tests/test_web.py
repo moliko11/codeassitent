@@ -30,15 +30,17 @@ def _tmp_persist_root(tmp_path, monkeypatch):
 def _seed_run(run_id, *, status="completed", model="deepseek-v4-pro",
               usage=None, started_at=1785655927.0):
     """落一个 run:run_meta.json 侧车 + trace.jsonl(run span + step span 带 usage)。"""
-    usage = usage or {"input_tokens": 100, "output_tokens": 50, "total_tokens": 150}
+    usage = usage or {"input_tokens": 100, "output_tokens": 50, "total_tokens": 150, "cached_tokens": 80}
     rdir = paths.PERSIST_ROOT / run_id
     rdir.mkdir(parents=True, exist_ok=True)
     meta = {
         "run_id": run_id, "status": status, "started_at": started_at,
         "ended_at": started_at + 1, "duration_ms": 1000.0,
         "token_input": usage["input_tokens"], "token_output": usage["output_tokens"],
-        "token_total": usage["total_tokens"], "step_count": 1, "tool_count": 0,
+        "token_total": usage["total_tokens"], "token_cached": usage.get("cached_tokens", 0),
+        "step_count": 1, "tool_count": 0,
         "tool_success_rate": 0.0, "model": model,
+        "system_prompt": "## 测试段\n测试内容(对齐 demo)",
     }
     (rdir / "run_meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
     spans = [
@@ -92,13 +94,15 @@ def test_api_stats():
 
 def test_api_run_detail():
     """GET /api/runs/{id} -> meta + report;report.token_total = step usage 之和(坑1)。"""
-    _seed_run("r-1", usage={"input_tokens": 100, "output_tokens": 50, "total_tokens": 150})
+    _seed_run("r-1", usage={"input_tokens": 100, "output_tokens": 50, "total_tokens": 150, "cached_tokens": 80})
     d = client.get("/api/runs/r-1").json()
     assert d["meta"]["status"] == "completed"
     assert d["meta"]["token_total"] == 150
     assert d["report"] is not None
     assert d["report"]["token_total"] == 150      # load trace 聚合,与侧车一致
     assert d["report"]["step_count"] == 1
+    assert "## 测试段" in d["meta"]["system_prompt"]   # 按会话存的系统提示词
+    assert d["meta"]["token_cached"] == 80              # 缓存命中 token
 
 
 def test_api_run_trace():

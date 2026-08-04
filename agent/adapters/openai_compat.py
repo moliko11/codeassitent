@@ -98,6 +98,7 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
                     input_tokens=getattr(u, "prompt_tokens", 0) or 0,
                     output_tokens=getattr(u, "completion_tokens", 0) or 0,
                     total_tokens=getattr(u, "total_tokens", 0) or 0,
+                    cached_tokens=self._extract_cached_tokens(u),
                 )
             choices = getattr(chunk, "choices", None) or []
             if not choices:
@@ -227,6 +228,7 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
                 input_tokens=getattr(response.usage, "prompt_tokens", 0) or 0,
                 output_tokens=getattr(response.usage, "completion_tokens", 0) or 0,
                 total_tokens=getattr(response.usage, "total_tokens", 0) or 0,
+                cached_tokens=self._extract_cached_tokens(response.usage),
             )
 
         return ModelResponse(

@@ -18,6 +18,7 @@ class RunReport:
     token_input: int = 0
     token_output: int = 0
     token_total: int = 0
+    token_cached: int = 0           # 缓存命中 token(cached_tokens 之和,是 input 子集;命中率=cached/input)
     timeout_count: int = 0
     retry_count: int = 0
 
@@ -42,6 +43,7 @@ class MetricsCollector:
                     rep.token_input += u.get("input_tokens", 0)
                     rep.token_output += u.get("output_tokens", 0)
                     rep.token_total += u.get("total_tokens", 0)
+                    rep.token_cached += u.get("cached_tokens", 0) or 0
             elif span.type == "tool":
                 rep.tool_count += 1
                 if span.attrs.get("ok"):

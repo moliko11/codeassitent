@@ -96,6 +96,7 @@ class Tracer(EventSink):
                         "input_tokens": getattr(usage, "input_tokens", 0),
                         "output_tokens": getattr(usage, "output_tokens", 0),
                         "total_tokens": getattr(usage, "total_tokens", 0),
+                        "cached_tokens": getattr(usage, "cached_tokens", 0),
                     }
 
             case _:

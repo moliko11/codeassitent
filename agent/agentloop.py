@@ -362,9 +362,17 @@ def _write_run_meta(state: AgentState, report, model: str):
       直发 printer 绕过 tracer),report.status 会是 'unknown'。
     - started_at 用墙钟:state.created_at 是 perf_counter(非墙钟),by_day 需真日期;
       duration 来自 perf_counter 差(准),用 ended_at - duration 回推出墙钟 start。
-    - token 来自 report(step span attrs["usage"] 之和,坑1:LLM 返回的精确值,非估算)。"""
+    - token 来自 report(step span attrs["usage"] 之和,坑1:LLM 返回的精确值,非估算)。
+    - system_prompt 取 state.messages 里实际注入的 system 消息(首轮 append 的;动态组装
+      build_system_prompt 后此处即动态版),保证监控展示 = 模型实际收到的。"""
     import json
     from .persist.paths import run_meta_path
+    # 取实际注入的 system 提示词(静态 config.system_prompt 或动态 build_system_prompt 结果)
+    sys_prompt = ""
+    for m in state.messages:
+        if getattr(m, "role", None) == "system":
+            sys_prompt = getattr(m, "content", "") or ""
+            break
     ended_at = time.time()
     meta = {
         "run_id": state.run_id,
@@ -375,19 +383,21 @@ def _write_run_meta(state: AgentState, report, model: str):
         "token_input": report.token_input,
         "token_output": report.token_output,
         "token_total": report.token_total,
+        "token_cached": report.token_cached,         # 缓存命中 token(命中率=cached/input,为 cost §8 铺路)
         "step_count": report.step_count,
         "tool_count": report.tool_count,
         "tool_success_rate": report.tool_success_rate,
         "model": model,                             # 给后续 cost 用(§8 TODO)
+        "system_prompt": sys_prompt,                # 实际注入的(静态/动态都准),详情页分层展示
     }
     run_meta_path(state.run_id).write_text(
         json.dumps(meta, ensure_ascii=False), encoding="utf-8")
 
 
-def _sum_step_usage(spans) -> tuple[int, int, int]:
-    """sum step span 的 usage,返回 (input, output, total)。total=0 用 input+output 兜底(坑4)。
+def _sum_step_usage(spans) -> tuple[int, int, int, int]:
+    """sum step span 的 usage,返回 (input, output, total, cached)。total=0 用 input+output 兜底(坑4)。
     REPL 每轮末尾打印 token 用:本轮 = 新增 span,累计 = 全部 span。"""
-    ti = to = tt = 0
+    ti = to = tt = tc = 0
     for s in spans:
         if s.type != "step":
             continue
@@ -400,7 +410,13 @@ def _sum_step_usage(spans) -> tuple[int, int, int]:
         ti += i
         to += o
         tt += t if t > 0 else i + o
-    return ti, to, tt
+        tc += u.get("cached_tokens", 0) or 0
+    return ti, to, tt, tc
+
+
+def _rate(c: int, i: int) -> str:
+    """缓存命中率 cached/input,无 input 返 '-'。"""
+    return f"{round(c * 100 / i)}%" if i else "-"
 
 async def _execute_pending(state: AgentState, context: RuntimeContext, persister):
     """resume 后执行 pending_tool_calls（崩在执行中的工具，per-call_id）。
@@ -540,8 +556,9 @@ async def run_agent_loop(registry: ToolRegistry,
         # 增量写:每轮结束就落盘(累计),崩在下一轮前也保留到最近完成的轮(用户要求,不依赖 exit)
         from .tracing.metrics import MetricsCollector
         rep = MetricsCollector().collect(tracer.trace)
-        turn_in, turn_out, _ = _sum_step_usage(tracer.trace.spans[spans_before:])
-        print(f"  [本轮 in:{turn_in} out:{turn_out} / 累计 in:{rep.token_input} out:{rep.token_output} tokens]")
+        turn_in, turn_out, _, turn_cached = _sum_step_usage(tracer.trace.spans[spans_before:])
+        print(f"  [本轮 in:{turn_in} out:{turn_out} cache:{turn_cached}({_rate(turn_cached, turn_in)}) / "
+              f"累计 in:{rep.token_input} out:{rep.token_output} cache:{rep.token_cached}({_rate(rep.token_cached, rep.token_input)})]")
         _write_run_meta(state, rep, config.model)
         messages = state.messages   # 同步共享 list（append 返回 copy，state.messages 已离开原对象）
         last_state = state

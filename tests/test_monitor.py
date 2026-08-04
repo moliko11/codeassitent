@@ -76,12 +76,12 @@ def _echo_registry():
     return reg
 
 
-def _ctx(adapter, state=None, persist=True, model="test-model", reg=None):
+def _ctx(adapter, state=None, persist=True, model="test-model", reg=None, system_prompt=""):
     return RuntimeContext(
         registry=reg or ToolRegistry(),
         tool_executor=ToolExecutor(reg or ToolRegistry()),
         model_adapter=adapter,
-        config=AgentConfig(max_steps=10, system_prompt="", model=model),
+        config=AgentConfig(max_steps=10, system_prompt=system_prompt, model=model),
         state=state or AgentState(),
         sink=NullSink(),
         persist=persist,
@@ -102,7 +102,7 @@ def _seed_transcript_only(run_id: str, status="failed"):
 def test_run_meta_written_with_tokens():
     """新跑一个 run(persist=True)-> run_meta.json 落盘,含精确 token(坑1)+ status + model。"""
     adapter = _UsageAdapter([
-        ModelResponse(text="done", usage=TokenUsage(input_tokens=100, output_tokens=50, total_tokens=150)),
+        ModelResponse(text="done", usage=TokenUsage(input_tokens=100, output_tokens=50, total_tokens=150, cached_tokens=80)),
     ])
     state = asyncio.run(agentloop("hi", _ctx(adapter)))
 
@@ -114,8 +114,21 @@ def test_run_meta_written_with_tokens():
     assert meta["token_input"] == 100
     assert meta["token_output"] == 50
     assert meta["token_total"] == 150          # 坑1:LLM 返回的精确 usage,非 count_message_tokens 估算
+    assert meta["token_cached"] == 80          # 缓存命中(adapter 填 -> tracer 记 -> metrics 聚合 -> meta 存)
     assert meta["model"] == "test-model"        # §8 cost 用
     assert meta["started_at"] > 0               # 墙钟(by_day 需要真日期,state.created_at 是 perf_counter 不行)
+    assert meta["system_prompt"] == ""          # 按会话存(此处 _ctx 用空 system_prompt)
+
+
+def test_run_meta_stores_system_prompt():
+    """run_meta 按会话存 system_prompt(不同 run 可能用不同提示词),详情页分层展示用。"""
+    sp = "## 段一\n内容一\n## 段二(对齐 X)\n内容二"
+    adapter = _UsageAdapter([ModelResponse(text="done", usage=TokenUsage(1, 1, 2))])
+    state = asyncio.run(agentloop("hi", _ctx(adapter, system_prompt=sp)))
+    meta = json.loads(run_meta_path(state.run_id).read_text(encoding="utf-8"))
+    assert meta["system_prompt"].startswith(sp)     # 静态核心在前(动态组装后 sp 仍是前缀)
+    assert "## 语言" in meta["system_prompt"]        # 动态段已追加(build_system_prompt)
+    assert meta["system_prompt"].count("## ") == 5   # 静态 2 + 动态 3(语言/环境/工具结果清理)
 
 
 def test_no_run_meta_when_not_persisted():
@@ -203,18 +216,20 @@ def test_aggregate_stats():
     # run 1:1 工具(成功)+ final,两 step usage 150+30=180,model=test-model
     asyncio.run(agentloop("hi", _ctx(_UsageAdapter([
         ModelResponse(tool_calls=[ToolCall(call_id="c1", tool_name="echo", arguments={"x": 1})],
-                      usage=TokenUsage(100, 50, 150)),
+                      usage=TokenUsage(100, 50, 150, 60)),
         ModelResponse(text="done", usage=TokenUsage(20, 10, 30)),
     ]), reg=reg)))
-    # run 2:final only,usage 5/5/10,model=other-model(无工具 -> success_rate=0)
+    # run 2:final only,usage 5/5/10(cached=5),model=other-model(无工具 -> success_rate=0)
     asyncio.run(agentloop("yo", _ctx(_UsageAdapter([
-        ModelResponse(text="ok", usage=TokenUsage(5, 5, 10))]), model="other-model")))
+        ModelResponse(text="ok", usage=TokenUsage(5, 5, 10, 5))]), model="other-model")))
 
     s = aggregate_stats(list_runs())
     assert s.run_count == 2
     assert s.total_token_input == 125            # 100+20+5
     assert s.total_token_output == 65            # 50+10+5
     assert s.total_token == 190                  # 180+10(坑4 fallback 不触发,total 都 >0)
+    assert s.total_token_cached == 65            # 60 + 0 + 5
+    assert abs(s.avg_cache_hit_rate - 65/125) < 0.01   # 65/125 ≈ 0.52
     # by_model
     assert s.by_model["test-model"]["token"] == 180
     assert s.by_model["test-model"]["runs"] == 1
