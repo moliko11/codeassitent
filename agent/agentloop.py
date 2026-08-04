@@ -9,7 +9,7 @@ from .core.errors import classify_error
 
 from .control.actions import Action, decide
 
-from .prompts import SOFT_STOP_HINT
+from .prompts import SOFT_STOP_HINT, build_system_prompt
 
 from .control.loop_detector import LoopDetector
 from .control.planner import Planner
@@ -262,8 +262,10 @@ async def _run_turn(user_input: str, state: AgentState, context: RuntimeContext,
     config = context.config
     # 1. 初始化对话消息：首轮(system+user)；续轮(只 append user，保留跨轮上下文)
     #    判据：state.messages 是否为空——空=首轮，非空=续轮(已有跨轮历史)
-    if not state.messages and config.system_prompt:
-        state.messages.append(Message(role="system", content=config.system_prompt))
+    if not state.messages:
+        prompt = build_system_prompt(config)   # 静态核心 + 会话级动态段(对齐 cc getSystemPrompt)
+        if prompt:
+            state.messages.append(Message(role="system", content=prompt))
     # 阶段8: on_input Guardrail(prompt 注入检测),block 则不进 messages
     if context.guardrail_runner is not None:
         gr = context.guardrail_runner.run("on_input", user_input, context)
