@@ -104,7 +104,13 @@ async def _run_steps(state: AgentState, context: RuntimeContext, persister, subt
                 max_tokens=context.config.max_tokens,
             )
             step.model_request = model_request
-            model_response = await context.model_adapter.stream_llm(model_request, sink)
+            # step_timeout 作用于 LLM 调用(对齐 config"每轮 Agent 循环超时"):挂起的流不再永久阻塞。
+            # asyncio.wait_for 超时抛 TimeoutError(无 status_code)-> classify_error 判可重试 -> 重试到阈值后 fail。
+            # 注:这是总时长上限;极长生成(>step_timeout)需调大 config.step_timeout。
+            model_response = await asyncio.wait_for(
+                context.model_adapter.stream_llm(model_request, sink),
+                timeout=config.step_timeout,
+            )
             step.model_response = model_response
 
             # durability-first：先落盘（decide 前，FINISH/tool_call 两路都保住付费 LLM 回复）
@@ -178,10 +184,10 @@ async def _run_steps(state: AgentState, context: RuntimeContext, persister, subt
                 state.reset_error()
                 loop_detector.observe(model_response.tool_calls)
                 if loop_detector.is_looping():
-                    state.messages.append(Message(
-                        role="user",
-                        content=SOFT_STOP_HINT.format(step=step.index, tool=tool_results[0].tool_name),
-                    ))
+                    _soft_stop = SOFT_STOP_HINT.format(step=step.index, tool=tool_results[0].tool_name)
+                    state.messages.append(Message(role="user", content=_soft_stop))
+                    if persister:
+                        persister.log_user(_soft_stop)   # durability-first:合成 user 消息也落盘,resume 不丢
                     loop_detector.reset()
 
             # 版本链条:本轮工具执行后封口 snapshot(对标 CC makeSnapshot,每轮末)
@@ -203,18 +209,20 @@ async def _run_steps(state: AgentState, context: RuntimeContext, persister, subt
             if state.consecutive_tool_failures >= config.max_consecutive_tool_failures:
                 state.fail(error)
                 return state
-            state.messages.append(Message(
-                role="user",
-                content=f"[系统提示] 上一步执行失败：{error['type']}: {error['message']}。"
-                        f"请根据错误信息调整下一步，或直接给出最终答案。",
-            ))
+            _err_hint = (f"[系统提示] 上一步执行失败：{error['type']}: {error['message']}。"
+                         f"请根据错误信息调整下一步，或直接给出最终答案。")
+            state.messages.append(Message(role="user", content=_err_hint))
+            if persister:
+                persister.log_user(_err_hint)
             # 可重试且未超阈值：继续下一轮（StepEnd 已发）
 
     if not state.is_terminal():
         if subtask:
             # plan_execute 子任务超 max_steps:不转终态,回填提示让外层 plan_execute 继续下一步
-            state.messages.append(Message(role="user",
-                content=f"[子任务超过 max_steps={state.max_steps},强制结束当前子任务]"))
+            _subtask_hint = f"[子任务超过 max_steps={state.max_steps},强制结束当前子任务]"
+            state.messages.append(Message(role="user", content=_subtask_hint))
+            if persister:
+                persister.log_user(_subtask_hint)
             state.final_response = None
         else:
             state.exceed_max_steps()
@@ -301,8 +309,10 @@ async def _run_plan_execute(user_input: str, state: AgentState, context: Runtime
         plan_step.status = "completed"
         plan_step.result = result
         # 子任务结果作为 observation 回灌(对齐 CC:子 agent 结果 -> parent messages)
-        state.messages.append(Message(role="user",
-            content=f"[plan step 完成:{plan_step.content}]\n结果:{result}"))
+        _obs = f"[plan step 完成:{plan_step.content}]\n结果:{result}"
+        state.messages.append(Message(role="user", content=_obs))
+        if persister:
+            persister.log_user(_obs)
         # 防漂移:每 replan_every 步调 Critic 评估计划
         if config.critic_enabled and step_idx % config.replan_every == config.replan_every - 1:
             critique = await Critic(context.model_adapter).evaluate_plan(plan, state)
@@ -449,6 +459,12 @@ async def continue_loop(state: AgentState, context: RuntimeContext) -> AgentStat
     先执行 pending（崩在工具执行中），再进主循环。Persister 以 append 模式复用同一 transcript。"""
     sink = context.sink
     persister = Persister(state.run_id) if context.persist else None
+    # 续跑也须初始化 _runtime_state(与 agentloop/run_agent_loop 入口对齐):
+    # 否则 model_adapter/workspace/file_history 全 None -> WebFetch 坏、edit/write 跳权限校验、
+    # 无备份/rewind、read_file_state 空 -> Edit 报"先读后改"(阶段5 验收涉文件任务必崩)。
+    _init_file_history(state.run_id, context.persist)
+    _runtime_state.model_adapter.set(context.model_adapter)
+    _runtime_state.workspace.set(context.workspace)
     sink.emit(RunStart(run_id=state.run_id))
     # 续跑重置步数计数：max_steps 是单轮上限，重放出的历史 steps 不该吃掉续跑预算。
     # steps 保留为历史轨迹（审计/重放），step_index 仅控制"还能跑几步"。

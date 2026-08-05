@@ -228,11 +228,17 @@ class ToolExecutor:
     def _run_with_timeout(self, handler, args, timeout, cancel_event):
         """单工具超时包装。timeout=None 不限时。超时抛 ToolTimeoutError（可重试）。"""
         from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+        import contextvars
         if timeout is None:
             return handler(**args)
         # ⚠️ 不用 with：with 退出会 shutdown(wait=True) 等孤儿线程，超时就废了
+        # 复制当前 context 进 pool 线程:ThreadPoolExecutor worker 启动时是 fresh 上下文,不继承
+        # ContextVar。若不复制,handler 看不到 _runtime_state 的 model_adapter/workspace/file_history/
+        # current_step_id(即使 agentloop/continue_loop 已 .set())-> WebFetch 坏、edit/write 跳权限校验、
+        # track_edit 拿不到 step_id。copy_context().run 让 handler 在调用方上下文里跑。
+        ctx = contextvars.copy_context()
         pool = ThreadPoolExecutor(max_workers=1)
-        fut = pool.submit(handler, **args)
+        fut = pool.submit(lambda: ctx.run(handler, **args))
         try:
             return fut.result(timeout=timeout)
         except FuturesTimeout:

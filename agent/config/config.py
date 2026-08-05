@@ -10,12 +10,12 @@ class AgentConfig:
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     model: str = "deepseek-v4-pro"
     temperature: float = 0.7
-    max_tokens: int = 10000
-    max_steps: int = 10 # 最大循环步数，超过则强制结束循环（防止无限循环）
+    max_tokens: int = 30000
+    max_steps: int = 25 # 最大循环步数，超过则强制结束循环（防止无限循环）
     enable_tools: bool = True
     max_consecutive_tool_failures: int = 3 # 连续工具调用失败次数，超过则强制结束循环
     soft_stop_threshold: int = 3  # 连续重复调用相同工具+参数的次数，达此值注入软终止提醒（继续运行，不强制结束）
-    step_timeout: float = 60.0  # 每轮 Agent 循环的超时时间（秒），超过则抛出 StepTimeout 异常
+    step_timeout: float = 200.0  # 每轮 Agent 循环的超时时间（秒），超过则抛出 StepTimeout 异常
     context_budget: Optional[int] = None  # 阶段 6：单次请求输入侧 token 预算(None=不限)。模型 window 减 max_tokens 再打折
     language: str = "中文"  # 动态提示词:语言段(对齐 cc language section),独立于静态核心
     include_git_info: bool = True  # 动态提示词:是否注入 git 仓库段(分支/remote,对齐 cc env_info 的 git 部分);False 跳过

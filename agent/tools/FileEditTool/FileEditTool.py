@@ -28,6 +28,12 @@ EDIT_SCHEMA = {
     mutates_external=True,   # 走 before_mutation -> trackEdit 备份
 )
 def edit(file_path, old_string, new_string, replace_all=False):
+    # 守卫:空 old_string 时 content.replace("",new) 会在每个字符间插入,静默损坏整个文件
+    # (count("")=len+1;replace_all=True 尤甚);old==new 是无意义替换。对标 CC 拒绝空 old_string。
+    if not old_string:
+        raise ValueError("old_string must not be empty.")
+    if old_string == new_string:
+        raise ValueError("old_string and new_string must differ.")
     ws = _runtime_state.workspace.get()
     path = ws.resolve(file_path) if ws else Path(file_path).resolve()
     if ws and not ws.allows(file_path):

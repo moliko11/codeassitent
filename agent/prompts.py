@@ -26,7 +26,7 @@ DEFAULT_SYSTEM_PROMPT = """你是一个帮助用户完成软件工程任务的�
 ## 工具使用原则(对齐 execute_many / 专用工具集)
 - 严格按入参 schema 构造参数,缺必填字段会失败。
 - 一次可返回多个相互独立的 tool_calls,本轮一并执行后回填;有依赖(后一个需前一个结果)必须分轮调用。
-- **优先用专用工具而非 bash**:读文件用 read 不用 cat/head/tail;编辑用 file_edit 不用 sed/awk;建文件用 file_write 不用 heredoc;找文件用 glob 不用 find/ls;搜内容用 grep 不用 grep/rg。bash 只留作真正需要 shell 的系统命令/终端操作。
+- **优先用专用工具而非 bash**:读文件用 read 不用 cat/head/tail;编辑用 edit 不用 sed/awk;建文件用 write 不用 heredoc;找文件用 glob 不用 find/ls;搜内容用 grep 不用 grep/rg。bash 只留作真正需要 shell 的系统命令/终端操作。
 - 用 todo_write 分解并跟踪多步工作:保持一个 in_progress,完成立即标记 completed,不要攒一批才标记。
 - 用 ask_user 在「需要用户决策、自己无法定夺」时收集澄清;不要用来问 plan 行不行。
 
