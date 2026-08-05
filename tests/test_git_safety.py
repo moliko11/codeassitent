@@ -11,6 +11,9 @@
 executor 级只测 block / ask-denied 两条(均在 subprocess 前短路,不跑 git)。
 运行(从 code/ 目录,3.12 venv):python -m pytest tests/test_git_safety.py -v
 """
+import os
+import tempfile
+
 import pytest
 
 from agent.guardrails import GitSafetyGuard, GuardrailRunner, classify_git_command, GitDecision
@@ -120,6 +123,30 @@ def test_global_option_before_subcommand_ask():
     assert classify_git_command("git --git-dir=.git status") == GitDecision.ASK
 
 
+# ─────────────────── P1:--output 任意文件写硬拦 ───────────────────
+
+def test_output_flag_blocked():
+    """--output=FILE(diff/log/show 任意文件写/覆盖)-> BLOCK。"""
+    assert classify_git_command("git diff --output=/tmp/pwned") == GitDecision.BLOCK
+    assert classify_git_command("git log --output=/tmp/x") == GitDecision.BLOCK
+    assert classify_git_command("git show --output=x HEAD") == GitDecision.BLOCK
+    assert classify_git_command("git diff --output") == GitDecision.BLOCK  # 精确 token
+
+
+def test_output_no_false_positive():
+    """不含 --output 的只读命令仍 allow。"""
+    assert classify_git_command("git diff --stat") == GitDecision.ALLOW
+    assert classify_git_command("git log --oneline") == GitDecision.ALLOW
+
+
+# ─────────────────── P1:cd+git 复合(已被复合检测覆盖)───────────────────
+
+def test_cd_git_compound_ask():
+    """cd <dir> && git ...:复合命令 -> ASK(防恶意目录 bare repo hook;CC 专门拦,我们复用复合检测)。"""
+    assert classify_git_command("cd /tmp/x && git status") == GitDecision.ASK
+    assert classify_git_command("cd /tmp/evil && git push") == GitDecision.ASK
+
+
 # ─────────────────── Guardrail(注入 mock confirmer)───────────────────
 
 def _call(command):
@@ -184,6 +211,61 @@ def test_guard_compound_ask_then_block_if_denied():
     g = GitSafetyGuard(confirmer=lambda c: False)
     r = g.check(_call("git log && rm -rf /"), _ctx())
     assert r.action == "block"
+
+
+# ─────────────────── P1:bare repo 检测(RCE via hooks)───────────────────
+
+def test_is_bare_repo_detects_bare_layout():
+    """cwd 顶层 HEAD+objects+refs(无 .git/HEAD)-> 是 bare repo。"""
+    from agent.guardrails.git_safety import _is_bare_repo
+    with tempfile.TemporaryDirectory() as d:
+        os.makedirs(os.path.join(d, "objects"))
+        os.makedirs(os.path.join(d, "refs"))
+        open(os.path.join(d, "HEAD"), "w").close()
+        assert _is_bare_repo(d) is True
+
+
+def test_is_bare_repo_normal_repo_not_bare():
+    """普通仓库(.git/ 子目录,顶层无 HEAD/objects/refs)-> 非 bare;空目录也非 bare。"""
+    from agent.guardrails.git_safety import _is_bare_repo
+    with tempfile.TemporaryDirectory() as d:
+        os.makedirs(os.path.join(d, ".git"))
+        open(os.path.join(d, ".git", "HEAD"), "w").close()
+        assert _is_bare_repo(d) is False
+    with tempfile.TemporaryDirectory() as d:
+        assert _is_bare_repo(d) is False
+
+
+def test_is_bare_repo_with_gitdir_not_bare():
+    """cwd 既顶层有 HEAD/objects/refs 又有 .git/HEAD -> 不当 bare(有 .git/HEAD 保守放过)。"""
+    from agent.guardrails.git_safety import _is_bare_repo
+    with tempfile.TemporaryDirectory() as d:
+        os.makedirs(os.path.join(d, "objects"))
+        os.makedirs(os.path.join(d, "refs"))
+        open(os.path.join(d, "HEAD"), "w").close()
+        os.makedirs(os.path.join(d, ".git"))
+        open(os.path.join(d, ".git", "HEAD"), "w").close()
+        assert _is_bare_repo(d) is False
+
+
+def test_guard_blocks_git_in_bare_repo(monkeypatch, tmp_path):
+    """bare repo cwd 下任何 git 命令 -> block(早于子命令判定,防 hooks RCE)。"""
+    (tmp_path / "objects").mkdir()
+    (tmp_path / "refs").mkdir()
+    (tmp_path / "HEAD").write_text("ref: refs/heads/main\n")
+    monkeypatch.chdir(tmp_path)
+    g = GitSafetyGuard()
+    r = g.check(_call("git log"), _ctx())
+    assert r.action == "block"
+    assert "bare" in r.reason
+    assert g.check(_call("git push"), _ctx()).action == "block"  # 写命令也拦
+
+
+def test_guard_allows_git_in_normal_dir(monkeypatch, tmp_path):
+    """普通目录(非 bare)下只读 git 仍 allow(bare 检测不误伤)。"""
+    monkeypatch.chdir(tmp_path)
+    g = GitSafetyGuard(confirmer=lambda c: False)  # 只读不调 confirmer,deny 闭包不影响
+    assert g.check(_call("git log"), _ctx()).action == "allow"
 
 
 # ─────────────────── executor 级接线(不跑 subprocess)───────────────────

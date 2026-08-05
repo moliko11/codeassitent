@@ -4,20 +4,23 @@
 # 不在白名单的(所有写命令)= 非只读 = fall through 到 ask;只有能 RCE 的才硬拦。
 # 见 docs/cc-git-integration.md「工具内安全层」「实现优先级」两节。
 #
-# 本文件只做 P0 最小可用(细节可简化,对标项目 impl-style):
+# 本文件只做 P0+P1 最小可用(细节可简化,对标项目 impl-style):
 # 1. 只读白名单:git log/diff/show/blame/status 免确认。其余 git 子命令 -> ask。
-# 2. 硬拦 config 注入 flag:-c / --exec-path / --config-env(能设 core.fsmonitor /
-#    diff.external 执行任意命令 = RCE),对标 readOnlyValidation.ts:1721-1745。
-# 3. safeFlags 本期不做 per-flag 校验(留 P1),只认子命令名 + 硬拦那三个 flag。
+# 2. 硬拦 RCE / 任意写 flag:-c / --exec-path / --config-env(config 注入,能设 core.fsmonitor
+#    等执行任意命令);--output=FILE(diff/log/show 任意文件写)。对标 readOnlyValidation.ts:1721-1745。
+# 3. safeFlags 本期不做 per-flag 校验(留后续),只认子命令名 + 硬拦上述 flag。
 # 4. 归一化后判定:剥 env var 前缀(NO_COLOR=1 git ...)和 shell quote('git' status)
 #    再判,防绕过。对标 isNormalizedGitCommand(bashPermissions.ts:2567)。
 # 5. 复合命令 / 命令替换( ; & | ` $( 换行 )含 git -> ask(无法证明整体只读)。
-#    full per-subcommand 分析(自动放行 git log | head)留 P1。
+#    full per-subcommand 分析(自动放行 git log | head)留后续。cd+git 也由此覆盖(cd X && git)。
+# 6. bare repo 检测:cwd 顶层含 HEAD/objects/refs(无 .git/HEAD)时,任何 git 命令 -> block
+#    (跑 git 触发 cwd hooks = RCE)。对标 isCurrentDirectoryBareGitRepo(git.ts:876-925)。
 #
 # ask 入口:同步 confirmer(可注入)。默认 input() + 非 tty fail-closed 拒绝
 # (对标 AskUserQuestionTool 的 stdin 简化路径;一次性 agentloop/CI 不跑写 git 命令)。
 # 不走 needs_approval + waiting_approval:该路径续跑留 TODO(见 agentloop.py:149),
 # 会卡住 REPL;P1 接好续跑后再升级。
+import os
 import re
 import shlex
 import sys
@@ -84,6 +87,25 @@ def _has_compound_or_rce(command: str) -> bool:
     return any(ch in command for ch in _RCE_OR_COMPOUND_CHARS)
 
 
+def _is_bare_repo(cwd: str) -> bool:
+    """cwd 是否被 git 当 bare repo(有 HEAD/objects/refs 但无有效 .git/HEAD)。
+
+    bare repo 下跑 git 会触发 cwd 的 hooks/*(RCE)。对标 CC isCurrentDirectoryBareGitRepo
+    (git.ts:876-925,三大沙箱逃逸之一)。普通仓库的 git 元数据在 .git/ 子目录,cwd 顶层无
+    HEAD/objects/refs;bare repo 直接把这三者放在 cwd 顶层。worktree/submodule 的 .git 是文件,
+    顶层也无此布局 -> 不误判。
+    """
+    head = os.path.join(cwd, "HEAD")
+    objects = os.path.join(cwd, "objects")
+    refs = os.path.join(cwd, "refs")
+    if not (os.path.isfile(head) and os.path.isdir(objects) and os.path.isdir(refs)):
+        return False
+    # 有有效 .git/HEAD 则是普通仓库(防 cwd 既被当 bare 又有 .git 的诡异情形误判)
+    if os.path.isfile(os.path.join(cwd, ".git", "HEAD")):
+        return False
+    return True
+
+
 def classify_git_command(command: str) -> str:
     """分类一条 shell 命令中的 git 调用,返回 GitDecision.*。
 
@@ -94,9 +116,13 @@ def classify_git_command(command: str) -> str:
     if not any(_is_git_token(t) for t in tokens):
         return GitDecision.NOT_GIT
 
-    # 硬拦 config 注入 flag(全局 flag,任意位置出现都拒)
+    # 硬拦能 RCE / 任意写的 flag(全局,任意位置出现都拒):
+    # - config 注入(-c/--exec-path/--config-env):能设 core.fsmonitor 等执行任意命令(RCE)
+    # - --output=FILE:diff/log/show 把输出写到任意路径(任意文件写/覆盖)
     for t in tokens:
         if t == "-c" or t.startswith(GIT_CONFIG_INJECTION_FLAG_PREFIXES):
+            return GitDecision.BLOCK
+        if t == "--output" or t.startswith("--output="):
             return GitDecision.BLOCK
 
     # 复合命令 / 命令替换含 git:无法证明整体只读 -> ask
@@ -151,12 +177,29 @@ class GitSafetyGuard(Guardrail):
         command = (call.arguments or {}).get("command") or ""
         decision = classify_git_command(command)
 
-        if decision in (GitDecision.NOT_GIT, GitDecision.ALLOW):
+        if decision == GitDecision.NOT_GIT:
+            return GuardrailResult(passed=True, action="allow")
+
+        # 是 git 命令:先查 bare repo(RCE via hooks),早于子命令判定,对标 CC
+        # hasGitCommand && isCurrentDirectoryBareGitRepo()。getcwd 异常时 fail-open。
+        try:
+            cwd = os.getcwd()
+        except OSError:
+            cwd = None
+        if cwd is not None and _is_bare_repo(cwd):
+            return GuardrailResult(
+                passed=False, action="block",
+                reason="当前目录是 bare git repo(顶层含 HEAD/objects/refs,无 .git/HEAD),"
+                       "跑 git 会触发其 hooks(RCE),已硬拦",
+            )
+
+        if decision == GitDecision.ALLOW:
             return GuardrailResult(passed=True, action="allow")
         if decision == GitDecision.BLOCK:
             return GuardrailResult(
                 passed=False, action="block",
-                reason="git 命令含 config 注入 flag(-c/--exec-path/--config-env),已硬拦(防 RCE)",
+                reason="git 命令含 config 注入 flag(-c/--exec-path/--config-env)或 --output,"
+                       "已硬拦(防 RCE / 任意文件写)",
             )
         # ASK:同步确认
         confirmer = self._confirmer or _default_confirmer
