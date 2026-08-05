@@ -76,12 +76,14 @@ def _echo_registry():
     return reg
 
 
-def _ctx(adapter, state=None, persist=True, model="test-model", reg=None, system_prompt=""):
+def _ctx(adapter, state=None, persist=True, model="test-model", reg=None, system_prompt="",
+        include_git_info=True):
     return RuntimeContext(
         registry=reg or ToolRegistry(),
         tool_executor=ToolExecutor(reg or ToolRegistry()),
         model_adapter=adapter,
-        config=AgentConfig(max_steps=10, system_prompt=system_prompt, model=model),
+        config=AgentConfig(max_steps=10, system_prompt=system_prompt, model=model,
+                           include_git_info=include_git_info),
         state=state or AgentState(),
         sink=NullSink(),
         persist=persist,
@@ -124,11 +126,11 @@ def test_run_meta_stores_system_prompt():
     """run_meta 按会话存 system_prompt(不同 run 可能用不同提示词),详情页分层展示用。"""
     sp = "## 段一\n内容一\n## 段二(对齐 X)\n内容二"
     adapter = _UsageAdapter([ModelResponse(text="done", usage=TokenUsage(1, 1, 2))])
-    state = asyncio.run(agentloop("hi", _ctx(adapter, system_prompt=sp)))
+    state = asyncio.run(agentloop("hi", _ctx(adapter, system_prompt=sp, include_git_info=False)))
     meta = json.loads(run_meta_path(state.run_id).read_text(encoding="utf-8"))
     assert meta["system_prompt"].startswith(sp)     # 静态核心在前(动态组装后 sp 仍是前缀)
     assert "## 语言" in meta["system_prompt"]        # 动态段已追加(build_system_prompt)
-    assert meta["system_prompt"].count("## ") == 5   # 静态 2 + 动态 3(语言/环境/工具结果清理)
+    assert meta["system_prompt"].count("## ") == 5   # 静态 2 + 动态 3(语言/环境/工具结果清理);git 段关闭防 cwd 是否仓库影响计数
 
 
 def test_no_run_meta_when_not_persisted():

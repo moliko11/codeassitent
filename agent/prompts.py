@@ -37,6 +37,11 @@ DEFAULT_SYSTEM_PROMPT = """你是一个帮助用户完成软件工程任务的�
 - 大文件(>300 行)用 read 的 offset+limit 分段,不要一次灌进来。
 - 连续读取后留意上下文占用,接近预算时停止批量加载,改用 grep 精确定位。
 
+## 改代码前先看 git 历史(对齐 GitSafetyGuard 白名单)
+- 改代码前并行跑 git status / git diff / git log(看最近 commit 风格与改动范围),用历史驱动编辑,不盲目改。
+- 只读 git 命令(log/diff/show/blame/status)免确认可自由用;写命令(push/commit/reset/add/checkout 等)会询问你确认,执行前主动说明。
+- 独立的 git 命令一次发多个并行 bash 调用(如 git status + git diff + git log 三个并行)。
+
 ## 执行任务(工程风格)
 - 改代码前先读代码。不要对没读过的代码提修改建议;用户让你改某文件,先理解现有实现再改。
 - 优先编辑现有文件而非新建文件,避免文件膨胀。
@@ -101,6 +106,27 @@ def _env_info(config) -> str:
     )
 
 
+def _git_info(config) -> str | None:
+    """git 仓库段(对齐 cc env_info 的 git 部分)。非仓库 / include_git_info=False -> None(不注入)。
+
+    会话级段:首轮 build 一次,会话内不变(同 _env_info)。spawn git + 进程内缓存
+    (agent.utils.git),fail-open:非仓库 / git 未装 -> None,不阻塞 prompt 组装。
+    """
+    if not getattr(config, "include_git_info", True):
+        return None
+    from .utils.git import is_git_repo, get_branch, get_remote_url, normalize_remote_url
+    cwd = os.getcwd()
+    if not is_git_repo(cwd):
+        return None
+    branch = get_branch(cwd) or "(detached)"
+    remote = normalize_remote_url(get_remote_url(cwd))  # 归一化,不泄漏凭据
+    line = f"## 仓库\n- git 仓库:是(分支:{branch}"
+    if remote:
+        line += f", remote:{remote}"
+    line += ")"
+    return line
+
+
 def _frc(config) -> str:
     """工具结果清理段(对齐 cc frc + summarize_tool_results)。
     对齐本项目 micro_compact:清老 tool_result content 成占位,保留最近 K 条原文。
@@ -126,9 +152,9 @@ def _token_budget(config):
     )
 
 
-# 会话级动态段顺序:静态核心 -> 语言 -> 环境 -> 工具结果清理 -> 预算
+# 会话级动态段顺序:静态核心 -> 语言 -> 环境 -> 仓库 -> 工具结果清理 -> 预算
 # (越靠后越易变,对齐 cc "静态在前、动态在后" 以利 provider 隐式缓存命中前缀)
-_SESSION_DYNAMIC_SECTIONS = (_language, _env_info, _frc, _token_budget)
+_SESSION_DYNAMIC_SECTIONS = (_language, _env_info, _git_info, _frc, _token_budget)
 
 
 def build_system_prompt(config) -> str:
