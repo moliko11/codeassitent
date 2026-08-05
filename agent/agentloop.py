@@ -550,10 +550,10 @@ async def run_agent_loop(registry: ToolRegistry,
         # _run_turn 往 state.messages append user(in-place)；但 append_assistant/tool_result 返回
         # 新 list(copy)，state.messages 会离开共享 messages 对象，故每轮结束用 messages = state.messages
         # 同步（见下），否则下一轮丢失上一轮 assistant + tool_result（bug2）。
-        printer.emit(RunStart(run_id=session_run_id))
+        context.sink.emit(RunStart(run_id=session_run_id))   # 走 CompositeSink(printer+tracer),让 tracer 收到 RunStart 建 run span
         spans_before = len(tracer.trace.spans)          # 记本轮前 span 数,差出本轮新增(算本轮 token)
         state = await _run_turn(user_input, state, context, persister)
-        _emit_run_end(state, printer)   # 每轮 UI 结束提示；不 log_run_end（session 级，退出时才写）
+        _emit_run_end(state, context.sink)   # 走 CompositeSink -> tracer 收 RunEnd 落盘 trace.jsonl(修 REPL 无 trace 的坑)
         # 每轮末尾:聚合 Metrics(会话级累计)+ 打印 token + 增量落盘 run_meta
         # 增量写:每轮结束就落盘(累计),崩在下一轮前也保留到最近完成的轮(用户要求,不依赖 exit)
         from .tracing.metrics import MetricsCollector

@@ -26,6 +26,7 @@
   .t-run { background: #6366f1; }
   .t-step { background: #10b981; }
   .t-tool { background: #f59e0b; }
+  .agent-sub { border-left: 3px solid #ef4444; }   /* 子 agent span(task 工具派的)标红边 */
   .t-guardrail { background: #ef4444; }
   .t-approval { background: #8b5cf6; }
   .meta-grid { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 12px 0; font-size: 13px; }
@@ -86,17 +87,24 @@ async function runDetail(runId){
     get('/api/runs/'+encodeURIComponent(runId)+'/trace').catch(e=>null),   // 无 trace 不阻断
   ]);
   const meta = detail.meta, rep = detail.report;
-  // 火焰图:按 parent_id 建树,嵌套条,宽 ∝ duration_ms(相对 run 总时长)
+  // 火焰图:按 parent_id 建树,嵌套条,宽 ∝ duration_ms(相对 run 总时长);子 agent span(agent_id)标红边
   const spans = (trace&&trace.spans)||[];
   const byParent = {};
   spans.forEach(s=>{ (byParent[s.parent_id] = byParent[s.parent_id]||[]).push(s); });
   const runDur = Math.max(...spans.map(s=>s.duration_ms||0), 1);
+  // 工具数按 agent 拆:无 agent_id=主循环,有=子 agent(task 工具派的)
+  const _toolSpans = spans.filter(s=>s.type==='tool');
+  const mainTools = _toolSpans.filter(s=>!(s.attrs&&s.attrs.agent_id)).length;
+  const subTools = _toolSpans.filter(s=>s.attrs&&s.attrs.agent_id).length;
   function render(parentId, depth){
     return (byParent[parentId]||[]).map(s=>{
       const w = Math.max((s.duration_ms||0)/runDur*100, 3);
       const u = s.attrs&&s.attrs.usage ? ` · in${s.attrs.usage.input_tokens}/out${s.attrs.usage.output_tokens}` : '';
-      const lbl = `${s.type} ${esc(s.name)} · ${fmtDur(s.duration_ms)}${u}`;
-      return `<div class="span t-${s.type}" style="margin-left:${depth*16}px;width:${w}%" title="${lbl}">${lbl}</div>${render(s.span_id, depth+1)}`;
+      const aid = s.attrs&&s.attrs.agent_id;
+      const agentMark = aid ? ` <span style="color:#ef4444">[子]</span>` : '';
+      const cls = `span t-${s.type}${aid?' agent-sub':''}`;
+      const lbl = `${s.type} ${esc(s.name)}${agentMark} · ${fmtDur(s.duration_ms)}${u}`;
+      return `<div class="${cls}" style="margin-left:${depth*16}px;width:${w}%" title="${lbl}">${lbl}</div>${render(s.span_id, depth+1)}`;
     }).join('');
   }
   const flame = spans.length ? `<div class="flame">${render(null,0)}</div>` : '<div class="dim">无 trace(崩了没 RunEnd,坑2;或 run 还在跑)</div>';
@@ -117,7 +125,7 @@ async function runDetail(runId){
       <dt>状态 / model</dt><dd>${badge(meta.status)} ${esc(meta.model)}</dd>
       <dt>耗时 / 开始</dt><dd>${fmtDur(meta.duration_ms)} · ${fmtTs(meta.started_at)}</dd>
       <dt>token (入/出/缓存/总)</dt><dd>${meta.token_input} / ${meta.token_output} / ${meta.token_cached}(${_rate(meta.token_cached, meta.token_input)}) / ${meta.token_total}</dd>
-      <dt>steps / tools</dt><dd>${meta.step_count} / ${meta.tool_count}</dd>
+      <dt>steps / tools</dt><dd>${meta.step_count} / ${meta.tool_count}${subTools>0?` <span class=dim>(主${mainTools}/子${subTools})</span>`:''}</dd>
       <dt>成功率</dt><dd>${(meta.tool_success_rate*100).toFixed(0)}%</dd>
       ${repExtra}
     </dl>
@@ -129,11 +137,16 @@ async function runDetail(runId){
     tHtml = recs.map(r=>{
       if(r.type==='user') return `<div><b>user:</b> ${esc(r.content)}</div>`;
       if(r.type==='assistant'){
-        const tcs = (r.tool_calls||[]).map(tc=>{
+        const tcs = r.tool_calls||[];
+        // >1 个 tool_call = 并行批次(execute_many 同轮并发),标出来
+        const batch = tcs.length > 1
+          ? `<div class=dim style="color:#f59e0b">  ┌ 并行 ${tcs.length} 个: [${tcs.map(tc=>esc(tc.tool_name||'')).join(', ')}]</div>`
+          : '';
+        const tcsHtml = tcs.map(tc=>{
           const args = tc.arguments ? JSON.stringify(tc.arguments) : '';
           return `<div class=dim>  ⏺ ${esc(tc.tool_name||'')}(<span style="color:#6366f1">${esc(args)}</span>)</div>`;
         }).join('');
-        return `<div><b>assistant:</b> ${esc(r.text||'(仅工具调用)')}</div>${tcs}`;
+        return `<div><b>assistant:</b> ${esc(r.text||'(仅工具调用)')}</div>${batch}${tcsHtml}`;
       }
       if(r.type==='tool_result'){
         const res = r.result||{};
