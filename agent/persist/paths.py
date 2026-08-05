@@ -33,3 +33,7 @@ def memory_dir() -> Path:
     d = PERSIST_ROOT.parent / "memory"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+def audit_path() -> Path:
+    """工具调用审计日志(会话级 JSONL,跨 run 共享,与 runs/ 平级)。AuditLogger 追加写。"""
+    return PERSIST_ROOT.parent / "audit.jsonl"

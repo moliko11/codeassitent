@@ -15,7 +15,8 @@ from .control.loop_detector import LoopDetector
 from .control.planner import Planner
 from .control.critic import Critic
 from .guardrails import (GuardrailRunner, PromptInjectionGuard,
-    PermissionGuard, HighRiskGuard, PIIGuard, IndirectInjectionGuard, GitSafetyGuard)
+    PermissionGuard, HighRiskGuard, PIIGuard, IndirectInjectionGuard, GitSafetyGuard,
+    ToolResultPIIGuard)
 
 from .config.config import AgentConfig
 from .config.provider import load_provider_config, make_adapter
@@ -113,7 +114,15 @@ async def _run_steps(state: AgentState, context: RuntimeContext, persister, subt
             )
             step.model_response = model_response
 
-            # durability-first：先落盘（decide 前，FINISH/tool_call 两路都保住付费 LLM 回复）
+            # 阶段8: on_output Guardrail(PII 脱敏)在落盘前--否则 transcript 先存原始 PII,内存才脱敏,
+            # 脱敏被落盘击败(#12)。对所有回复都过(工具轮 text 通常为空,无副作用;脱敏进 messages+final)。
+            if context.guardrail_runner is not None:
+                _final_text = getattr(model_response, "text", None) or ""
+                _gr = context.guardrail_runner.run("on_output", _final_text, context)
+                if _gr.action == "sanitize" and _gr.sanitized is not None:
+                    model_response.text = _gr.sanitized
+
+            # durability-first：先落盘（decide 前，FINISH/tool_call 两路都保住付费 LLM 回复;此处已脱敏）
             if persister:
                 persister.log_assistant(model_response)
 
@@ -121,12 +130,6 @@ async def _run_steps(state: AgentState, context: RuntimeContext, persister, subt
             if action == Action.FINISH:
                 # final 也进 messages 作历史（推翻 Decision 3：多轮对话需要上一轮最终回复作上下文，
                 # 否则下一轮 model 看不到、重复回答）。final_response 仍设，给 _emit_run_end 取 final_text。
-                # 阶段8: on_output Guardrail(PII 脱敏)在 append 前,脱敏进 messages + final
-                if context.guardrail_runner is not None:
-                    _final_text = getattr(model_response, "text", None) or ""
-                    _gr = context.guardrail_runner.run("on_output", _final_text, context)
-                    if _gr.action == "sanitize" and _gr.sanitized is not None:
-                        model_response.text = _gr.sanitized
                 state.messages = context.model_adapter.append_assistant(state.messages, model_response)
                 if subtask:
                     # plan_execute 子任务:只设结果,不转终态(保持 running,让外层继续下一步)
@@ -461,7 +464,7 @@ async def continue_loop(state: AgentState, context: RuntimeContext) -> AgentStat
     persister = Persister(state.run_id) if context.persist else None
     # 续跑也须初始化 _runtime_state(与 agentloop/run_agent_loop 入口对齐):
     # 否则 model_adapter/workspace/file_history 全 None -> WebFetch 坏、edit/write 跳权限校验、
-    # 无备份/rewind、read_file_state 空 -> Edit 报"先读后改"(阶段5 验收涉文件任务必崩)。
+    # 无备份/rewind、read_file_state 空 -> Edit 报"先读后改"(阶段5 验收 resume 涉文件任务必崩)。
     _init_file_history(state.run_id, context.persist)
     _runtime_state.model_adapter.set(context.model_adapter)
     _runtime_state.workspace.set(context.workspace)
@@ -623,9 +626,22 @@ def main():
     guardrail_runner.register(PromptInjectionGuard()) \
         .register(PermissionGuard()).register(HighRiskGuard()) \
         .register(GitSafetyGuard()) \
-        .register(PIIGuard()).register(IndirectInjectionGuard())
-    tool_executor = ToolExecutor(registry, before_mutation=_track_edit_callback,
-                                  guardrail_runner=guardrail_runner, config=config)
+        .register(PIIGuard()).register(IndirectInjectionGuard()) \
+        .register(ToolResultPIIGuard())
+    # 可靠性四件套默认全开(对标阶段4,修复"默认三件关闭"=死代码):
+    # retry_policy + retry_mode=runtime_retry(可重试错误自动重试)、idempotency_store(幂等去重)、
+    # audit_logger(审计 JSONL)。熔断默认已在 ToolExecutor.__init__ 开。
+    from .reliability.retry import RetryPolicy
+    from .reliability.idempotency import IdempotencyStore
+    from .reliability.audit import AuditLogger
+    from .persist.paths import audit_path
+    tool_executor = ToolExecutor(
+        registry, before_mutation=_track_edit_callback,
+        guardrail_runner=guardrail_runner, config=config,
+        retry_policy=RetryPolicy(), retry_mode="runtime_retry",
+        idempotency_store=IdempotencyStore(),
+        audit_logger=AuditLogger(log_path=str(audit_path())),
+    )
 
      # 步6:创建 memory_store + 注册 save_memory 工具(闭包捕获 store)
     from .memory import MemoryStore

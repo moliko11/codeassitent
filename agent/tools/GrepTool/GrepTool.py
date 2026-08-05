@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 
 from ..registry import tool
+from .. import _runtime_state
 
 GREP_SCHEMA = {
     "type": "object",
@@ -34,7 +35,10 @@ GREP_SCHEMA = {
     mutates_external=False,
 )
 def grep(pattern, path=".", glob=None, output_mode="files_with_matches"):
-    base = Path(path)
+    ws = _runtime_state.workspace.get()
+    if ws and not ws.allows(path):
+        raise PermissionError(f"路径不在工作空间允许集内: {path}")
+    base = ws.resolve(path) if ws else Path(path)
     regex = re.compile(pattern)
     # 收集待搜文件
     if base.is_file():

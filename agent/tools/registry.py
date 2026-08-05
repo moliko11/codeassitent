@@ -179,7 +179,7 @@ class ToolExecutor:
                     ok=False, error={"type": "GuardrailBlocked", "message": gr.reason, "retryable": False},
                     meta=call.meta)
             elif gr.action == "sanitize" and gr.sanitized is not None:
-                result.text = gr.sanitized
+                result = gr.sanitized   # ToolResultPIIGuard 返回改好 text+data 的 ToolResult(原地改 data,_finalize 再从 data 重算 text)
 
         # 7. 收尾
         return self._done(result, call, user_id, start_ts)
