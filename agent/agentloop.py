@@ -15,7 +15,7 @@ from .control.loop_detector import LoopDetector
 from .control.planner import Planner
 from .control.critic import Critic
 from .guardrails import (GuardrailRunner, PromptInjectionGuard,
-    PermissionGuard, HighRiskGuard, PIIGuard, IndirectInjectionGuard)
+    PermissionGuard, HighRiskGuard, PIIGuard, IndirectInjectionGuard, GitSafetyGuard)
 
 from .config.config import AgentConfig
 from .config.provider import load_provider_config, make_adapter
@@ -606,6 +606,7 @@ def main():
     guardrail_runner = GuardrailRunner()
     guardrail_runner.register(PromptInjectionGuard()) \
         .register(PermissionGuard()).register(HighRiskGuard()) \
+        .register(GitSafetyGuard()) \
         .register(PIIGuard()).register(IndirectInjectionGuard())
     tool_executor = ToolExecutor(registry, before_mutation=_track_edit_callback,
                                   guardrail_runner=guardrail_runner, config=config)
