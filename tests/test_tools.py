@@ -285,6 +285,24 @@ def test_edit_replace_all(tmp_path):
     assert a.read_text(encoding="utf-8") == "baz bar baz"
 
 
+def test_edit_rejects_empty_old_string(tmp_path):
+    """#13: 空 old_string 守卫--否则 content.replace("",new) 在每字符间插入,静默损坏整文件
+    (count("")=len+1;replace_all=True 时 'hello'.replace('','X')='XhXeXlXlXoX')。对标 CC 拒绝空 old_string。"""
+    a = tmp_path / "a.txt"; a.write_text("hello", encoding="utf-8")
+    _tool("read").handler(file_path=str(a))   # 先读,过"先读后改"闸门,证明守卫在其后仍拦住
+    with pytest.raises(ValueError, match="empty"):
+        _tool("edit").handler(file_path=str(a), old_string="", new_string="X", replace_all=True)
+    assert a.read_text(encoding="utf-8") == "hello"   # 文件未被破坏
+
+
+def test_edit_rejects_same_old_new(tmp_path):
+    """#13: old==new 是无意义替换,守卫拒绝。"""
+    a = tmp_path / "a.txt"; a.write_text("hello", encoding="utf-8")
+    _tool("read").handler(file_path=str(a))
+    with pytest.raises(ValueError, match="differ"):
+        _tool("edit").handler(file_path=str(a), old_string="hello", new_string="hello")
+
+
 def test_edit_single_replace_updates_state(tmp_path):
     """正常单次替换成功 + 更新 read_file_state(新内容 + 新 mtime)。"""
     a = tmp_path / "a.txt"; a.write_text("hello", encoding="utf-8")
@@ -590,15 +608,15 @@ def test_web_search_formats_results(monkeypatch):
 
 
 def test_web_search_network_error(monkeypatch):
-    """mock 网络错误 -> 返回结构化 error,不抛。"""
+    """mock 网络错误 -> raise ConnectionError(可重试,进可靠性管道),不再 return dict 被标 ok=True。"""
     import httpx
 
     def boom(*a, **k):
         raise httpx.HTTPError("boom")
     monkeypatch.setattr(httpx, "post", boom)
     monkeypatch.setenv("TAVILY_API_KEY", "fake")
-    r = _tool("web_search").handler(query="test")
-    assert isinstance(r, dict) and "error" in r
+    with pytest.raises(ConnectionError):
+        _tool("web_search").handler(query="test")
 
 
 # ============ WebFetch 工具(步3,httpx + LLM 提取)============
@@ -660,20 +678,20 @@ def test_web_fetch_extracts(monkeypatch):
 
 
 def test_web_fetch_invalid_url():
-    """无效 URL -> 返回 error(不抛)。"""
-    r = _tool("web_fetch").handler(url="ftp://x.com", prompt="x")
-    assert isinstance(r, dict) and "error" in r
+    """无效 URL -> raise ValueError(不重试),不再 return dict 被标 ok=True。"""
+    with pytest.raises(ValueError):
+        _tool("web_fetch").handler(url="ftp://x.com", prompt="x")
 
 
 def test_web_fetch_network_error(monkeypatch):
-    """mock 网络错误 -> 结构化 error,不崩。"""
+    """mock 网络错误 -> raise ConnectionError(可重试,进可靠性管道),不再 return dict 被标 ok=True。"""
     import httpx
 
     def boom(*a, **k):
         raise httpx.HTTPError("boom")
     monkeypatch.setattr(httpx, "get", boom)
-    r = _tool("web_fetch").handler(url="https://x.com", prompt="x")
-    assert isinstance(r, dict) and "error" in r
+    with pytest.raises(ConnectionError):
+        _tool("web_fetch").handler(url="https://x.com", prompt="x")
 
 
 # ============ TodoWrite 工具(步4,无状态 + nudge)============
