@@ -51,7 +51,11 @@ def _track_edit_callback(call):
     file_path = call.arguments.get("file_path")
     if not file_path:
         return
-    fh.track_edit(file_path, _runtime_state.current_step_id.get())
+    # 路径解析与 edit/write 一致(ws.resolve):否则 backup key 走 cwd-based Path.resolve,
+    # 与实际改的 workspace-based 文件不一致,workspace≠cwd 时 rewind 回滚到错文件(#2)。
+    ws = _runtime_state.workspace.get()
+    resolved = str(ws.resolve(file_path)) if ws else str(Path(file_path).resolve())
+    fh.track_edit(resolved, _runtime_state.current_step_id.get())
 
 
 def _init_file_history(run_id: str, persist: bool):

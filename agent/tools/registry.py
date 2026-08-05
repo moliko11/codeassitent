@@ -247,34 +247,38 @@ class ToolExecutor:
             pool.shutdown(wait=False)   # 不等孤儿线程(它继续跑到结束)
 
     def _execute_with_retry(self, tool, call, timeout, cancel_event):
-        """单工具 retry 循环。llm_retry/无 policy 只跑一次；runtime_retry 按 policy 重试。"""
+        """单工具 retry 循环。llm_retry/无 policy 只跑一次；runtime_retry 按 policy 重试。
+        把实际尝试次数 attempts 写进 result.meta,_parallel 再带进 ToolEnd -> Tracer 写进 span attrs,
+        MetricsCollector 据 attrs["attempts"] 算 retry_count(否则恒 0,#6)。"""
         policy = self.retry_policy
 
-        def mk(ok, **kw):
+        def mk(ok, attempts=1, **kw):
             return ToolResult(call_id=call.call_id, tool_name=call.tool_name,
-                              meta=call.meta, ok=ok, **kw)
+                              meta={**call.meta, "attempts": attempts}, ok=ok, **kw)
 
         # llm_retry 或无 policy：只跑一次，失败交回 agentloop 回填模型
         if self.retry_mode != "runtime_retry" or policy is None:
             try:
-                return mk(True, data=self._run_with_timeout(tool.handler, call.arguments, timeout, cancel_event))
+                return mk(True, attempts=1, data=self._run_with_timeout(tool.handler, call.arguments, timeout, cancel_event))
             except Exception as e:
-                return mk(False, error=classify_tool_error(e))
+                return mk(False, attempts=1, error=classify_tool_error(e))
 
         # runtime_retry：重试循环
         last_err = None
+        attempts = 0
         for attempt in range(policy.max_attempts):
+            attempts = attempt + 1
             if cancel_event and cancel_event.is_set():
-                return mk(False, error={"type": "Cancelled", "message": "执行被取消", "retryable": False})
+                return mk(False, attempts=attempts, error={"type": "Cancelled", "message": "执行被取消", "retryable": False})
             try:
-                return mk(True, data=self._run_with_timeout(tool.handler, call.arguments, timeout, cancel_event))
+                return mk(True, attempts=attempts, data=self._run_with_timeout(tool.handler, call.arguments, timeout, cancel_event))
             except Exception as e:
                 last_err = classify_tool_error(e)
                 if not policy.should_retry(last_err) or attempt == policy.max_attempts - 1:
                     break                       # 不可重试 / 用尽次数
                 if cancel_event and cancel_event.wait(policy.backoff(attempt)):
-                    return mk(False, error={"type": "Cancelled", "message": "执行被取消", "retryable": False})
-        return mk(False, error=last_err)
+                    return mk(False, attempts=attempts, error={"type": "Cancelled", "message": "执行被取消", "retryable": False})
+        return mk(False, attempts=attempts, error=last_err)
 
     def _audit_before(self, call, user_id):
         """记开始时间；没配 audit_logger 返回 None。"""
@@ -332,7 +336,8 @@ class ToolExecutor:
                     sink.emit(ToolEnd(
                         call_id=r.call_id, tool_name=r.tool_name, ok=r.ok,
                         error_type=(r.error or {}).get("type") if r.error else None,
-                        summary=_result_summary(r)))
+                        summary=_result_summary(r),
+                        attempts=(r.meta or {}).get("attempts", 1)))
                 yield r
         except asyncio.CancelledError:
             for t in tasks:

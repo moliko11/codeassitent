@@ -57,6 +57,7 @@ class ToolEnd:
     elapsed_ms: float = 0.0
     error_type: str | None = None
     summary: str | None = None
+    attempts: int = 1   # 实际尝试次数(含首次);>1 表示发生过重试,MetricsCollector 算 retry_count 用(#6)
 
 
 # ─────────────────── 低层：LLM 流式增量（adapter 发） ───────────────────

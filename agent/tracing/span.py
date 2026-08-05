@@ -1,6 +1,6 @@
 # tracing/span.py - Span 数据模型 + Trace(阶段9 任务1/2)
 # trace = span 树(观测,有层级+耗时);transcript = 消息流(重放)。共享 run_id,互补。
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Literal, Optional
 import time
 import uuid
@@ -73,7 +73,8 @@ class Trace:
 
     @classmethod
     def from_dict(cls, data: dict) -> "Trace":
-        return cls(
-            run_id=data["run_id"],
-            spans=[Span(**s) for s in data.get("spans", [])],
-        )
+        # 排除 to_dict 算出的 duration_ms(是方法非字段),否则 Span(**s) 报 unexpected kwarg TypeError(#5)。
+        _span_fields = {f.name for f in fields(Span)}
+        spans = [Span(**{k: v for k, v in s.items() if k in _span_fields})
+                 for s in data.get("spans", [])]
+        return cls(run_id=data["run_id"], spans=spans)

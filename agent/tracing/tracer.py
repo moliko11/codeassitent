@@ -72,11 +72,11 @@ class Tracer(EventSink):
                 self._tool_spans[call_id] = span
                 self.trace.add(span)
 
-            case ToolEnd(call_id, tool_name, ok, elapsed_ms, error_type, summary):
+            case ToolEnd(call_id, tool_name, ok, elapsed_ms, error_type, summary, attempts):
                 span = self._tool_spans.pop(call_id, None)
                 if span:
                     span.finish(ok=ok, elapsed_ms=elapsed_ms,
-                                error_type=error_type, summary=summary)
+                                error_type=error_type, summary=summary, attempts=attempts)
 
             case StepEnd(step_index):
                 if self._stack and self._stack[-1].type == "step":
