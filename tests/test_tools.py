@@ -769,3 +769,33 @@ def test_ask_user_schema_rejects_one_option():
         arguments={"questions": [{"question": "q", "header": "h", "options": [{"label": "only"}]}]}))
     assert not r.ok
     assert (r.error or {}).get("type") == "SchemaValidationError"
+
+
+# ============ P2 回归 ============
+
+def test_track_edit_uses_workspace_path(tmp_path):
+    """#2: _track_edit_callback 用 ws.resolve 解析路径(与 edit/write 一致),否则 workspace≠cwd 时
+    backup key(cwd-based)与实际改的文件(workspace-based)不一致,rewind 回滚到错文件。"""
+    from agent.agentloop import _track_edit_callback
+    from agent.core.workspace import Workspace
+    ws_root = tmp_path / "ws"; ws_root.mkdir()
+    fh = FileHistory(tmp_path / "fh")
+    _runtime_state.file_history.set(fh)
+    _runtime_state.workspace.set(Workspace(root=ws_root))
+    _runtime_state.current_step_id.set(0)
+    # 相对路径 "a.txt" -> ws.resolve -> ws_root/a.txt(不是 cwd/a.txt)
+    _track_edit_callback(ToolCall(call_id="c1", tool_name="edit",
+                                  arguments={"file_path": "a.txt"}))
+    key = str((ws_root / "a.txt").resolve())
+    assert key in fh.snapshots[-1].tracked   # backup key 是 workspace 路径,非 cwd
+
+
+def test_idempotency_get_returns_copy():
+    """#7: IdempotencyStore.get 返回 deepcopy,调用方改 data 不污染缓存(修复前返回浅引用)。"""
+    from agent.reliability.idempotency import IdempotencyStore
+    store = IdempotencyStore()
+    call = ToolCall(call_id="c1", tool_name="t", arguments={})
+    store.set(call, {"v": [1, 2, 3]})
+    got = store.get(call)
+    got["v"].append(999)                          # 改返回值
+    assert store.get(call)["v"] == [1, 2, 3]      # 缓存未被污染

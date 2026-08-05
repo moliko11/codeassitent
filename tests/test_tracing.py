@@ -226,3 +226,61 @@ def test_hitl_in_trace():
     tool_spans = [s for s in tracer.trace.spans if s.type == "tool"]
     assert len(tool_spans) == 1
     assert tool_spans[0].attrs.get("error_type") == "NeedsApproval"
+
+
+# ─────────────────── P2 回归 ───────────────────
+
+def test_trace_from_dict_roundtrip():
+    """#5: Trace.from_dict 不崩--to_dict 输出含 duration_ms(是方法非字段),from_dict 须排除它,
+    否则 Span(**s) 报 unexpected kwarg TypeError(公开 API 坏但 TraceStore.load 绕开,故潜伏)。"""
+    t = Tracer("run-fd")
+    t.emit(RunStart(run_id="run-fd"))
+    t.emit(StepStart(step_index=0))
+    t.emit(ToolStart(call_id="c1", tool_name="t", arguments={}))
+    t.emit(ToolEnd(call_id="c1", tool_name="t", ok=True, elapsed_ms=5, summary="ok"))
+    t.emit(StepEnd(step_index=0))
+    t.emit(RunEnd(status="completed", final_text="done", error=None))
+    d = t.trace.to_dict()
+    assert "duration_ms" in d["spans"][2]      # to_dict 确实输出了 duration_ms
+    restored = Trace.from_dict(d)               # 修复前:TypeError
+    assert len(restored.spans) == len(t.trace.spans)
+    assert restored.spans[2].type == "tool"
+    assert restored.spans[2].attrs["ok"] is True
+
+
+def test_retry_records_attempts_in_span():
+    """#6: runtime_retry 的尝试次数写进 tool span attrs['attempts'],MetricsCollector retry_count 不再恒 0。
+    链路:_execute_with_retry 写 result.meta['attempts'] -> _parallel 带进 ToolEnd -> Tracer 写 span attrs。"""
+    from agent.tools.registry import ToolRegistry, ToolExecutor
+    from agent.tools.defs import Tool, ToolSpec, ToolCall
+    from agent.reliability.retry import RetryPolicy
+    from agent.streaming.sink import CompositeSink, NullSink
+
+    n = {"i": 0}
+    def flaky(**kwargs):
+        n["i"] += 1
+        if n["i"] < 3:
+            raise ConnectionError("transient")   # 可重试
+        return {"ok": True}
+
+    reg = ToolRegistry()
+    reg.register(Tool(
+        tool_spec=ToolSpec(name="flaky", description="d", input_schema={"type": "object"}),
+        handler=flaky,
+    ))
+    tracer = Tracer("run-retry")
+    executor = ToolExecutor(reg, retry_policy=RetryPolicy(max_attempts=5),
+                            retry_mode="runtime_retry")
+
+    async def run():
+        async for r in executor.execute_many(
+                [ToolCall(call_id="c1", tool_name="flaky", arguments={})],
+                sink=CompositeSink(NullSink(), tracer)):
+            return r
+    r = asyncio.run(run())
+    assert r.ok, r.error
+    assert n["i"] == 3                                  # 失败 2 次 + 成功 1 次
+    tool_spans = [s for s in tracer.trace.spans if s.type == "tool"]
+    assert tool_spans[0].attrs.get("attempts") == 3     # #6: 尝试次数写进 span
+    rep = MetricsCollector().collect(tracer.trace)
+    assert rep.retry_count == 2                         # attempts-1 = 2 次重试(不再恒 0)
