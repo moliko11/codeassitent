@@ -29,7 +29,15 @@ class ArkAdapter(BaseModelAdapter):
     def __init__(self, api_key: str, base_url: str, model: str):
         super().__init__(api_key, base_url, model)
         # base_url 形如 https://ark.cn-beijing.volces.com/api/v3
-        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        # keepalive 禁用:长跑 server(uvicorn)下,httpx 连接池里被服务端关闭的 keepalive
+        # 连接被复用 -> APIConnectionError(间歇,重启即恢复)。keepalive_expiry=0 让连接用完即弃,
+        # 每次新连接(略慢但可靠,避免长跑后连接池失效)。
+        import httpx
+        self.client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            http_client=httpx.AsyncClient(limits=httpx.Limits(keepalive_expiry=0.0)),
+        )
 
     async def call_llm(self, request: ModelRequest) -> ModelResponse:
         input_items = self._to_input(request.messages)
