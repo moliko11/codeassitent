@@ -133,9 +133,10 @@ async function runDetail(runId){
     <h2>消息流(末尾)</h2><div class="msg" id="tbox">${tHtml}</div>
     ${spHtml}`;
   try {
-    const recs = await get('/api/runs/'+encodeURIComponent(runId)+'/transcript?limit=30');
+    const recs = await get('/api/runs/'+encodeURIComponent(runId)+'/transcript?limit=100000');
     tHtml = recs.map(r=>{
-      if(r.type==='user') return `<div><b>user:</b> ${esc(r.content)}</div>`;
+      const badge = r.agent_id ? `<span class=dim style="color:#f59e0b">[${esc(r.agent_id)}]</span> ` : '';
+      if(r.type==='user') return `<div>${badge}<b>user:</b> ${esc(r.content)}</div>`;
       if(r.type==='assistant'){
         const tcs = r.tool_calls||[];
         // >1 个 tool_call = 并行批次(execute_many 同轮并发),标出来
@@ -146,14 +147,14 @@ async function runDetail(runId){
           const args = tc.arguments ? JSON.stringify(tc.arguments) : '';
           return `<div class=dim>  ⏺ ${esc(tc.tool_name||'')}(<span style="color:#6366f1">${esc(args)}</span>)</div>`;
         }).join('');
-        return `<div><b>assistant:</b> ${esc(r.text||'(仅工具调用)')}</div>${batch}${tcsHtml}`;
+        return `<div>${badge}<b>assistant:</b> ${esc(r.text||'(仅工具调用)')}</div>${batch}${tcsHtml}`;
       }
       if(r.type==='tool_result'){
         const res = r.result||{};
         const summ = res.text || (res.data ? JSON.stringify(res.data) : '');
-        return `<div class=dim>  ⎿ ${esc(res.tool_name||'')} ${res.ok?'✓':'✗'} ${esc(summ).slice(0,100)}</div>`;
+        return `<div class=dim>${badge}  ⎿ ${esc(res.tool_name||'')} ${res.ok?'✓':'✗'} ${esc(summ).slice(0,100)}</div>`;
       }
-      if(r.type==='run_end') return `<div class=dim><b>run_end:</b> ${esc(r.status)}</div>`;
+      if(r.type==='run_end') return `<div class=dim>${badge}<b>run_end:</b> ${esc(r.status)}</div>`;
       return '';
     }).join('') || '<div class=dim>无消息</div>';
   } catch(e){ tHtml = '<div class=dim>'+esc(e.message)+'</div>'; }

@@ -29,10 +29,11 @@ class Agent:
     runtime: RuntimeContext
     agent_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
-    async def run(self, task: str, blackboard: Optional[Blackboard] = None) -> AgentState:
+    async def run(self, task: str, blackboard: Optional[Blackboard] = None, persister=None) -> AgentState:
         """执行任务:子 runtime(独立 config+state)+ blackboard 注入 + 调 _run_turn。
 
-        返回子 AgentState(含 final_response)。不落盘(persister=None,§8.3;CC 落 subagents/ 留 TODO)。
+        返回子 AgentState(含 final_response)。persister=None 不落盘(§8.3);传 persister 则子 agent
+        事件落该 transcript(Task 工具传主 persister + agent_id="subagent",web 可展示子 agent 流)。
         """
         from ..agentloop import _run_turn  # 延迟导入,避免 agentloop <-> multiagent 循环引用
 
@@ -52,4 +53,4 @@ class Agent:
             task_msg = f"{task}\n\n[共享黑板]\n{blackboard.snapshot()}"
 
         # 3. 复用 _run_turn(react/plan_execute/workflow 由 child_config.mode 决定)
-        return await _run_turn(task_msg, child_state, child_runtime, persister=None)
+        return await _run_turn(task_msg, child_state, child_runtime, persister=persister)

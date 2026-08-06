@@ -103,8 +103,8 @@ def api_run_trace(run_id: str):
 
 
 @app.get("/api/runs/{run_id}/transcript")
-def api_run_transcript(run_id: str, limit: int = Query(50, ge=1, le=1000)):
-    """消息流(末尾 N 条,默认 50,防 OOM)。"""
+def api_run_transcript(run_id: str, limit: int = Query(100000, ge=1, le=100000)):
+    """消息流(全量;OOM 由 read_transcript 的 50MB 上限兜底)。limit 保留但默认极大=返回全部。"""
     try:
         recs = list(read_transcript(run_id))
     except RuntimeError as e:   # transcript 过大(>50MB)

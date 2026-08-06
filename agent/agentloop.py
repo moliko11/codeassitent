@@ -158,7 +158,7 @@ async def _run_steps(state: AgentState, context: RuntimeContext, persister, subt
                 # Task 工具:拦截 subagent 请求(handler 同步跑不了 async agent.run),
                 # 异步跑子 agent 用其结果替换 tool result(对标 NeedsApproval 的拦截模式)
                 if r.ok and isinstance(r.data, dict) and r.data.get("__subagent__"):
-                    r = await _run_subagent(r, context)
+                    r = await _run_subagent(r, context, persister)
                 # 阶段8/9 HITL:needs_approval(高风险)转 waiting_approval(暂停,续跑留 TODO)
                 # needs_approval 通过 ToolEnd(error_type=NeedsApproval)进 trace,Tracer 自动捕获
                 if r.error and r.error.get("type") == "NeedsApproval":
@@ -236,7 +236,7 @@ async def _run_steps(state: AgentState, context: RuntimeContext, persister, subt
     return state
 
 
-async def _run_subagent(request, context: RuntimeContext) -> ToolResult:
+async def _run_subagent(request, context: RuntimeContext, persister=None) -> ToolResult:
     """跑一个子 agent 处理 Task 工具的子任务,返回其最终回答作为 ToolResult(对标 CC Task 工具)。
 
     handler 同步跑不了 async agent.run,故 Task 工具 handler 只返回请求标记,_run_steps 拦截后
@@ -263,8 +263,17 @@ async def _run_subagent(request, context: RuntimeContext) -> ToolResult:
                           text="子 agent 已后台派出,完成时会以 [task-notification] 通知主 agent(主 agent 可继续做别的)。",
                           meta=request.meta)
 
-    # 前台(默认):阻塞等子 agent 跑完,结果作为 tool result 当场返回
-    sub_state = await sub_agent.run(prompt)
+    # 前台(默认):阻塞等子 agent 跑完,结果作为 tool result 当场返回。
+    # 若 persister 可用,子 agent 事件带 agent_id="subagent" 落主 transcript(web 可展示子 agent 流)。
+    sub_persister = None
+    if persister is not None:
+        persister.agent_id = "subagent"   # 前台 inline 无并发,可直接改;finally 恢复
+        sub_persister = persister
+    try:
+        sub_state = await sub_agent.run(prompt, persister=sub_persister)
+    finally:
+        if persister is not None:
+            persister.agent_id = None
     text = getattr(sub_state.final_response, "text", "") if sub_state.final_response else ""
     return ToolResult(call_id=request.call_id, tool_name="task", ok=True,
                       data={"description": request.data.get("description", ""), "result": text},
@@ -413,6 +422,25 @@ def _write_run_meta(state: AgentState, report, model: str):
         json.dumps(meta, ensure_ascii=False), encoding="utf-8")
 
 
+def _write_run_start_meta(run_id: str, model: str, system_prompt: str):
+    """run 开始就写最小 run_meta.json(status=running + 真实墙钟 started_at),让 list_runs 立即展示
+    在途 run(不等第一轮完成)。_write_run_meta 轮末覆盖更新真实 token/duration/status。"""
+    import json
+    from .persist.paths import run_meta_path
+    meta = {
+        "run_id": run_id,
+        "status": "running",
+        "started_at": time.time(),   # 墙钟(开始时刻);_write_run_meta 轮末用 ended_at-duration 回推覆盖
+        "ended_at": None,
+        "duration_ms": 0.0,
+        "token_input": 0, "token_output": 0, "token_total": 0, "token_cached": 0,
+        "step_count": 0, "tool_count": 0, "tool_success_rate": 0.0,
+        "model": model,
+        "system_prompt": system_prompt,
+    }
+    run_meta_path(run_id).write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+
+
 def _sum_step_usage(spans) -> tuple[int, int, int, int]:
     """sum step span 的 usage,返回 (input, output, total, cached)。total=0 用 input+output 兜底(坑4)。
     REPL 每轮末尾打印 token 用:本轮 = 新增 span,累计 = 全部 span。"""
@@ -493,6 +521,8 @@ async def agentloop(user_input: str, context: RuntimeContext) -> AgentState:
     context.sink = CompositeSink(context.sink, tracer)
     sink = context.sink
     persister = Persister(state.run_id) if context.persist else None
+    if context.persist:
+        _write_run_start_meta(state.run_id, config.model, config.system_prompt)  # 在途 run 立即可见(问题1)
     _init_file_history(state.run_id, context.persist)   # 版本链条:按 run_id 初始化 file_history
     _runtime_state.model_adapter.set(context.model_adapter)   # 步3 WebFetch 用
     _runtime_state.workspace.set(context.workspace)  # 阶段8:路径权限(None=退回 Path.resolve)
@@ -544,6 +574,7 @@ async def run_agent_loop(registry: ToolRegistry,
     tracer = Tracer(session_run_id, store=TraceStore(session_run_id))
     messages: list = []               # 跨轮累积上下文（内存共享 list）
     persister = Persister(session_run_id)
+    _write_run_start_meta(session_run_id, config.model, config.system_prompt)  # 在途 run 立即可见(问题1)
     _init_file_history(session_run_id, True)   # 版本链条:REPL 持久化,按 session_run_id 初始化
     _runtime_state.model_adapter.set(model_adapter)   # 步3 WebFetch 用
     _runtime_state.workspace.set(Workspace(root=Path.cwd()))  # 阶段8:REPL 工作空间=cwd
