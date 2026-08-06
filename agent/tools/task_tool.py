@@ -31,8 +31,14 @@ def make_task_tool() -> Tool:
             description=(
                 "派一个子 agent(小弟)独立完成一个子任务,返回它的结果。子 agent 有自己的上下文和工具,"
                 "隔离运行(不继承本 agent 的对话历史,只看你给的 prompt)。用于:把复杂任务拆给子 agent、"
-                "让子 agent 专注一个子问题。description=子任务简短描述;prompt=给子 agent 的详细指令;"
-                "background=true 后台跑(主 agent 不等,继续做别的,完成后通知),默认 false(等结果)。"
+                "让子 agent 专注一个子问题。"
+                "description=子任务简短描述;prompt=给子 agent 的详细指令;background=是否后台(默认 false)。"
+                "\n\n前台 vs 后台(按需选,对标 CC Task 工具):"
+                " 前台(background=false,默认)=主 agent 阻塞等子 agent 跑完,结果当场拿到;"
+                "用于【需要子 agent 结果才能继续】的场景(如调研发现决定下一步、结果要进最终答案)。"
+                " 后台(background=true)=主 agent 不等、立即继续做别的,子 agent 完成后以 [task-notification] "
+                "通知(下轮注入);用于【有真正独立的并行工作】的场景。"
+                "后台子 agent 跑完会自动通知,不要 sleep/轮询/主动查进度。"
             ),
             input_schema=TASK_SCHEMA,
         ),
