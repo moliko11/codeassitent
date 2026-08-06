@@ -1,0 +1,33 @@
+{
+  "name": "chat-template",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone chat UI layout template, extracted from DeepTutor's conversation interface.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "next": "15.1.6",
+    "react": "19.0.0",
+    "react-dom": "19.0.0",
+    "react-markdown": "9.0.3",
+    "remark-gfm": "4.0.0",
+    "react-syntax-highlighter": "15.6.1",
+    "lucide-react": "0.468.0",
+    "clsx": "2.1.1",
+    "tailwind-merge": "2.6.0"
+  },
+  "devDependencies": {
+    "typescript": "5.7.3",
+    "@types/node": "22.10.5",
+    "@types/react": "19.0.7",
+    "@types/react-dom": "19.0.3",
+    "@types/react-syntax-highlighter": "15.5.13",
+    "tailwindcss": "3.4.17",
+    "postcss": "8.5.1",
+    "autoprefixer": "10.4.20"
+  }
+}

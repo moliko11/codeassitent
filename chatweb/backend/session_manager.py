@@ -9,9 +9,9 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
-from ..core.messages import Message
-from ..persist.persister import Persister
-from ..tracing import Tracer, TraceStore
+from agent.core.messages import Message
+from agent.persist.persister import Persister
+from agent.tracing import Tracer, TraceStore
 
 
 @dataclass

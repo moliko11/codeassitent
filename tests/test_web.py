@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 import agent.persist.paths as paths
 
 # app 在模块顶层导入(不捕获 PERSIST_ROOT;端点调用时才动态读,fixture 的 monkeypatch 生效)
-from web.server import app
+from monitor.backend.server import app
 
 client = TestClient(app)
 

@@ -23,33 +23,33 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 # ---- code/agent 复用(import 一次,模块级共享)----
-from .. import tools as _tools
-from ..config.provider import load_provider_config, make_adapter
-from ..config.config import AgentConfig
-from ..core.state import AgentState, _ser
-from ..core.workspace import Workspace
-from ..runtime import RuntimeContext
-from ..streaming.sink import CompositeSink
-from ..streaming.sse_sink import SSESink
-from ..streaming.events import RunStart, RunEnd, StreamEvent
-from ..tracing import Tracer, TraceStore
-from ..tracing.metrics import MetricsCollector
-from ..guardrails import (GuardrailRunner, PromptInjectionGuard, PermissionGuard,
+from agent import tools as _tools
+from agent.config.provider import load_provider_config, make_adapter
+from agent.config.config import AgentConfig
+from agent.core.state import AgentState, _ser
+from agent.core.workspace import Workspace
+from agent.runtime import RuntimeContext
+from agent.streaming.sink import CompositeSink
+from agent.streaming.sse_sink import SSESink
+from agent.streaming.events import RunStart, RunEnd, StreamEvent
+from agent.tracing import Tracer, TraceStore
+from agent.tracing.metrics import MetricsCollector
+from agent.guardrails import (GuardrailRunner, PromptInjectionGuard, PermissionGuard,
     HighRiskGuard, GitSafetyGuard, PIIGuard, IndirectInjectionGuard, ToolResultPIIGuard)
-from ..reliability.retry import RetryPolicy
-from ..reliability.idempotency import IdempotencyStore
-from ..reliability.audit import AuditLogger
-from ..persist.paths import memory_dir, audit_path, PERSIST_ROOT
-from ..persist.store import list_runs, read_run_report, read_transcript
-from ..persist.persister import Persister
-from ..memory import MemoryStore
-from ..tools.memory_tool import make_save_memory_tool
-from ..tools.task_tool import make_task_tool
-from ..tools import _runtime_state
-from ..agentloop import _run_turn, _emit_run_end, _write_run_meta
-from ..persist.replay import resume
-from ..prompts import build_system_prompt
-from ..core.messages import Message
+from agent.reliability.retry import RetryPolicy
+from agent.reliability.idempotency import IdempotencyStore
+from agent.reliability.audit import AuditLogger
+from agent.persist.paths import memory_dir, audit_path, PERSIST_ROOT
+from agent.persist.store import list_runs, read_run_report, read_transcript
+from agent.persist.persister import Persister
+from agent.memory import MemoryStore
+from agent.tools.memory_tool import make_save_memory_tool
+from agent.tools.task_tool import make_task_tool
+from agent.tools import _runtime_state
+from agent.agentloop import _run_turn, _emit_run_end, _write_run_meta
+from agent.persist.replay import resume
+from agent.prompts import build_system_prompt
+from agent.core.messages import Message
 
 from .session_manager import SessionManager, SessionState
 
@@ -74,7 +74,7 @@ _guardrail_runner.register(PromptInjectionGuard()) \
     .register(ToolResultPIIGuard())
 # 可靠性四件套(同 main L635-648,默认全开)
 _tool_executor = type(_tools.registry).__module__  # 占位,下面覆盖
-from ..tools.registry import ToolExecutor
+from agent.tools.registry import ToolExecutor
 _tool_executor = ToolExecutor(
     _registry,
     before_mutation=None,            # web 暂不接 file_history 版本链条(桌面端 diff 视图才需要,TODO)
@@ -328,8 +328,8 @@ async def close_session(run_id: str):
 
 
 def main():
-    """本地启动:cd code && python -m agent.web.server(须在 code/ 下,PERSIST_ROOT 相对路径)。
-    端口默认 8000;若被占(如 monitor_demo 跑在 8000),用 AGENT_PORT=8001 python -m agent.web.server,
+    """本地启动:cd code && python -m chatweb.backend.server(须在 code/ 下,PERSIST_ROOT 相对路径)。
+    端口默认 8000;若被占(如 monitor_demo 跑在 8000),用 AGENT_PORT=8001 python -m chatweb.backend.server,
     并在 chat-template/.env.local 设 AGENT_API=http://localhost:8001 对应。"""
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("AGENT_PORT", "8000")))
