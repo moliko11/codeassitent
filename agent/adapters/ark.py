@@ -2,7 +2,7 @@
 import json
 from typing import Any
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from ..core.messages import Message
 from ..core.models import ModelRequest, ModelResponse, TokenUsage
@@ -29,9 +29,17 @@ class ArkAdapter(BaseModelAdapter):
     def __init__(self, api_key: str, base_url: str, model: str):
         super().__init__(api_key, base_url, model)
         # base_url 形如 https://ark.cn-beijing.volces.com/api/v3
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        # keepalive 禁用:长跑 server(uvicorn)下,httpx 连接池里被服务端关闭的 keepalive
+        # 连接被复用 -> APIConnectionError(间歇,重启即恢复)。keepalive_expiry=0 让连接用完即弃,
+        # 每次新连接(略慢但可靠,避免长跑后连接池失效)。
+        import httpx
+        self.client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            http_client=httpx.AsyncClient(limits=httpx.Limits(keepalive_expiry=0.0)),
+        )
 
-    def call_llm(self, request: ModelRequest) -> ModelResponse:
+    async def call_llm(self, request: ModelRequest) -> ModelResponse:
         input_items = self._to_input(request.messages)
         kwargs: dict[str, Any] = {
             "model": request.model or self.model,
@@ -47,10 +55,10 @@ class ArkAdapter(BaseModelAdapter):
             kwargs["max_output_tokens"] = request.max_tokens
         # TODO(阶段7): request.thinking_budget 透传 provider(ark thinking 参数?待真实联调确认,暂不传)
 
-        response = self.client.responses.create(**kwargs)
+        response = await self.client.responses.create(**kwargs)
         return self._from_response(response)
 
-    def stream_llm(self, request: ModelRequest, sink: EventSink) -> ModelResponse:
+    async def stream_llm(self, request: ModelRequest, sink: EventSink) -> ModelResponse:
         """Responses API 真流式：stream=True，按 event.type 分发增量事件。
 
         Ark/Responses 流式事件（用 getattr 容错不同 SDK 版本的字段名）：
@@ -77,7 +85,7 @@ class ArkAdapter(BaseModelAdapter):
         if request.max_tokens is not None:
             kwargs["max_output_tokens"] = request.max_tokens
 
-        stream = self.client.responses.create(**kwargs)
+        stream = await self.client.responses.create(**kwargs)
 
         text_parts: list[str] = []
         tool_acc: dict[str, dict[str, Any]] = {}  # item_id -> {call_id, name, args}
@@ -86,7 +94,7 @@ class ArkAdapter(BaseModelAdapter):
         stop_reason: str | None = None #
         response_id: str | None = None #
 
-        for event in stream:
+        async for event in stream:
             etype = getattr(event, "type", "")
 
             if etype == "response.output_text.delta":
@@ -150,6 +158,7 @@ class ArkAdapter(BaseModelAdapter):
                             input_tokens=getattr(u, "input_tokens", 0) or 0,
                             output_tokens=getattr(u, "output_tokens", 0) or 0,
                             total_tokens=getattr(u, "total_tokens", 0) or 0,
+                            cached_tokens=self._extract_cached_tokens(u),
                         )
 
         # 收尾：对未收到 done 事件的 tool_call 补发 ToolCallEnd
@@ -260,6 +269,7 @@ class ArkAdapter(BaseModelAdapter):
                 input_tokens=getattr(u, "input_tokens", 0) or 0,
                 output_tokens=getattr(u, "output_tokens", 0) or 0,
                 total_tokens=getattr(u, "total_tokens", 0) or 0,
+                cached_tokens=self._extract_cached_tokens(u),
             )
 
         return ModelResponse(

@@ -5,6 +5,7 @@ pathlib.glob 支持 ** 递归;结果按 mtime 倒序(最近修改在前,对标 C
 from pathlib import Path
 
 from ..registry import tool
+from .. import _runtime_state
 
 GLOB_SCHEMA = {
     "type": "object",
@@ -18,12 +19,15 @@ GLOB_SCHEMA = {
 
 @tool(
     name="glob",
-    description="按文件名模式找文件(如 **/*.py),按 mtime 倒序(最近修改在前)。",
+    description="按文件名模式找文件(如 **/*.py),只返回路径不读内容,按 mtime 倒序。适合先摸清项目结构。",
     input_schema=GLOB_SCHEMA,
     mutates_external=False,
 )
 def glob(pattern, path="."):
-    base = Path(path)
+    ws = _runtime_state.workspace.get()
+    if ws and not ws.allows(path):
+        raise PermissionError(f"路径不在工作空间允许集内: {path}")
+    base = ws.resolve(path) if ws else Path(path)
     matches = [p for p in base.glob(pattern) if p.is_file()]
     matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     return [str(p) for p in matches]

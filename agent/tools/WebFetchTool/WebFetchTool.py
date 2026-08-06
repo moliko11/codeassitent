@@ -46,28 +46,29 @@ def web_fetch(url, prompt):
     if url.startswith("http://"):
         url = "https://" + url[7:]
     if not url.startswith("https://"):
-        return {"error": "无效 URL,需 http(s)://"}
+        raise ValueError("无效 URL,需 http(s)://")
     # 2. 抓(不跟随重定向)
     try:
         resp = httpx.get(url, timeout=30, follow_redirects=False)
     except httpx.HTTPError as e:
-        return {"error": f"网络错误: {e}"}
+        raise ConnectionError(f"网络错误: {e}") from e
     # 3. 跨域重定向不跟随,返回让模型重 fetch(对标 CC;简化:所有重定向都不跟随)
     if resp.is_redirect:
         loc = resp.headers.get("location", "")
         return f"REDIRECT to {loc}, please re-fetch with the new URL."
     if resp.status_code >= 400:
-        return {"error": f"HTTP {resp.status_code}"}
+        raise ConnectionError(f"HTTP {resp.status_code}")
     # 4. HTML -> text
     markdown = _html_to_text(resp.text)
     # 5. 用 model_adapter 调 LLM 提取(对标 CC small model,不复用主对话上下文)
-    adapter = _runtime_state.model_adapter
+    adapter = _runtime_state.model_adapter.get()
     if adapter is None:
-        return {"error": "无 model_adapter(未注入),无法提取"}
+        raise ValueError("无 model_adapter(未注入),无法提取")
     from ...core.models import ModelRequest   # 延迟 import 避免循环
     from ...core.messages import Message
-    result = adapter.call_llm(ModelRequest(messages=[
+    import asyncio
+    result = asyncio.run(adapter.call_llm(ModelRequest(messages=[
         Message(role="system", content="按 prompt 从网页内容提取,简洁回答"),
         Message(role="user", content=f"网页内容:\n{markdown[:8000]}\n\n问题:{prompt}"),
-    ]))
+    ])))
     return result.text

@@ -1,0 +1,8 @@
+﻿--- a/calc/ops.py
++++ b/calc/ops.py
+@@ -9,5 +9,5 @@
+ def divide(a, b):
+     if b == 0:
+-        return 0
++        raise ZeroDivisionError("division by zero")
+     return a / b

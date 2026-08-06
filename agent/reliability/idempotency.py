@@ -9,26 +9,36 @@
 # 不 import ToolCall：用 Any + 鸭子类型（call.call_id），保持 reliability 纯净无环。
 from __future__ import annotations
 
+import copy
+import threading
 from typing import Any, Callable
 
 
 class IdempotencyStore:
-    """幂等去重缓存，按 key 缓存「成功结果」，防止重复副作用。"""
+    """幂等去重缓存，按 key 缓存「成功结果」，防止重复副作用。
+
+    线程安全:_parallel 用 asyncio.to_thread 并发跑同 key 调用,get/set/has 加锁。
+    get 返回 deepcopy:防调用方改 data 污染缓存(#7)。"""
     def __init__(self, key_fn: Callable[[Any], str] | None = None):
         # 默认 key = call.call_id；可传 key_fn=lambda c: c.arguments["idempotency_key"]
         self._store: dict[str, Any] = {}
         self._key_fn = key_fn or (lambda call: call.call_id)
+        self._lock = threading.Lock()
 
     def _key(self, call) -> str:
         return self._key_fn(call)
 
     def get(self, call) -> Any | None:
-        """命中返回缓存结果，未命中返回 None。"""
-        return self._store.get(self._key(call))
+        """命中返回缓存结果的 deepcopy(防调用方改 data 污染缓存)，未命中返回 None。"""
+        with self._lock:
+            v = self._store.get(self._key(call))
+        return copy.deepcopy(v) if v is not None else None
 
     def has(self, call) -> bool:
-        return self._key(call) in self._store
+        with self._lock:
+            return self._key(call) in self._store
 
     def set(self, call, result: Any) -> None:
         """缓存一次成功结果。"""
-        self._store[self._key(call)] = result
+        with self._lock:
+            self._store[self._key(call)] = result

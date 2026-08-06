@@ -17,7 +17,7 @@ class Planner:
     def __init__(self, model_adapter):
         self.adapter = model_adapter
 
-    def make_plan(self, task: str, registry=None, prior: Plan | None = None) -> Plan:
+    async def make_plan(self, task: str, registry=None, prior: Plan | None = None) -> Plan:
         tools_desc = ""
         if registry is not None:
             try:
@@ -32,7 +32,7 @@ class Planner:
                 "\n\n原计划(需修订,已完成步骤标 completed,请据此调整剩余步骤):\n"
                 + json.dumps(prior.to_dict(), ensure_ascii=False, indent=2)
             )
-        resp = self.adapter.call_llm(ModelRequest(
+        resp = await self.adapter.call_llm(ModelRequest(
             messages=[
                 Message(role="system", content=PLAN_PROMPT),
                 Message(role="user", content=user_content),

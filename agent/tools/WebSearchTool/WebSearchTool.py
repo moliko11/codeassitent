@@ -3,7 +3,7 @@
 CC 的 WebSearch 借 Anthropic 服务端 web_search tool,DeepSeek/豆包没有,接 Tavily 第三方 API。
 结果格式化对标 CC:标题+url+摘要,末尾附 Sources markdown 链接(CC prompt 强制 "never skip sources")。
 - mutates_external=False,只读。
-- 参数错误(query 空 / allowed+blocked 同传)抛 ValueError;网络/key 错误返回结构化 error(不抛,对标文档)。
+- 参数错误(query 空 / allowed+blocked 同传)抛 ValueError;网络/key 错误抛异常(ValueError/ConnectionError,进可靠性管道,不被标 ok=True)。
 """
 import os
 
@@ -38,7 +38,7 @@ def web_search(query, allowed_domains=None, blocked_domains=None, max_results=5)
         raise ValueError("不能同时传 allowed_domains 和 blocked_domains")
     api_key = os.environ.get("TAVILY_API_KEY") or os.environ.get("TAVIL_API_KEY")
     if not api_key:
-        return {"error": "未设置 TAVILY_API_KEY/TAVIL_API_KEY 环境变量"}
+        raise ValueError("未设置 TAVILY_API_KEY/TAVIL_API_KEY 环境变量")
     try:
         resp = httpx.post(
             "https://api.tavily.com/search",
@@ -53,7 +53,7 @@ def web_search(query, allowed_domains=None, blocked_domains=None, max_results=5)
         )
         resp.raise_for_status()
     except httpx.HTTPError as e:
-        return {"error": f"网络错误: {e}"}
+        raise ConnectionError(f"网络错误: {e}") from e
     data = resp.json()
     results = data.get("results", [])
     # 格式化:每条 标题+url+摘要(截 300);末尾 Sources markdown 链接(对标 CC 强制)

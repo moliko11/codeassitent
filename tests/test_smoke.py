@@ -12,6 +12,7 @@
 """
 
 import json
+import asyncio
 import pytest
 from agent.agentloop import agentloop
 from agent.runtime import RuntimeContext
@@ -39,7 +40,7 @@ class _ScriptedAdapter(BaseModelAdapter):
         self.n = 0
         self.tool_rounds = tool_rounds
 
-    def call_llm(self, request):
+    async def call_llm(self, request):
         self.n += 1
         if self.n <= self.tool_rounds:
             return ModelResponse(
@@ -76,7 +77,7 @@ def _run_agent(tool_rounds=2) -> AgentState:
         config=AgentConfig(max_steps=5),
         state=AgentState(),
     )
-    return agentloop("hi", ctx)
+    return asyncio.run(agentloop("hi", ctx))
 
 
 def test_multi_step_loop_completes():
@@ -131,3 +132,41 @@ def test_try_apply_cas():
 
     assert s.try_apply(to_waiting, v) is True      # 版本匹配，成功
     assert s.try_apply(to_waiting, 999) is False   # 版本不匹配，拒绝
+
+
+# ───────────────────────── P0 回归 ─────────────────────────
+
+def test_llm_call_respects_step_timeout():
+    """#10: step_timeout 作用于 LLM 调用--挂起的流不再永久阻塞;连续超时达阈值后 fail(非 completed)。
+    修复前 stream_llm 无 timeout,挂起连接永久阻塞(agentloop 死等)。"""
+    reg = ToolRegistry()
+
+    class _SlowAdapter(_ScriptedAdapter):
+        async def call_llm(self, request):
+            self.n += 1
+            await asyncio.sleep(5)   # 远超 step_timeout,模拟挂起连接
+            return ModelResponse(text="done")
+
+    adapter = _SlowAdapter(tool_rounds=0)
+    ctx = RuntimeContext(
+        registry=reg,
+        tool_executor=ToolExecutor(reg),
+        model_adapter=adapter,
+        config=AgentConfig(max_steps=10, system_prompt="",
+                           step_timeout=0.3, max_consecutive_tool_failures=3),
+        state=AgentState(),
+    )
+    s = asyncio.run(agentloop("hi", ctx))
+    assert s.status != "completed"          # 连续 3 次超时 -> fail
+    assert adapter.n == 3                   # 重试 3 次后达阈值
+
+
+def test_prompt_tool_names_match_registry():
+    """#9: 提示词里的工具名须与注册名一致。修复前提示词写 file_edit/file_write,
+    实际注册名是 edit/write -> 模型照提示词调 -> ToolNotFound -> 浪费一轮。"""
+    from agent.prompts import build_system_prompt
+    prompt = build_system_prompt(AgentConfig())
+    assert "file_edit" not in prompt
+    assert "file_write" not in prompt
+    assert "编辑用 edit" in prompt
+    assert "建文件用 write" in prompt

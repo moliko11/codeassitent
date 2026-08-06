@@ -3,6 +3,8 @@
 不依赖真实 LLM。运行(从 code/ 目录,3.12 venv):
     python -m pytest tests/test_memory.py -v
 """
+import asyncio
+
 import pytest
 from agent.memory import MemoryStore, MEMORY_TYPES
 from agent.tools.memory_tool import make_save_memory_tool
@@ -89,7 +91,7 @@ def test_build_injects_index_and_recall(tmp_path):
     state.messages.append(Message(role="system", content="SYS"))
     state.messages.append(Message(role="user", content="用什么语言写后端 python"))
     builder = ContextBuilder(memory_store=store)
-    result = builder.build(state)
+    result = asyncio.run(builder.build(state))
     # system 之后插了一条记忆 system 消息
     injected = result.messages[1]
     assert injected.role == "system"
@@ -107,7 +109,7 @@ def test_build_injects_index_only_when_no_recall_match(tmp_path):
     state = AgentState()
     state.messages.append(Message(role="user", content="完全无关xyz"))
     builder = ContextBuilder(memory_store=store)
-    result = builder.build(state)
+    result = asyncio.run(builder.build(state))
     injected = result.messages[0]
     assert "记忆索引" in injected.content
     assert "召回的相关记忆" not in injected.content  # 无命中
@@ -119,5 +121,5 @@ def test_build_no_inject_when_no_memory(tmp_path):
     state = AgentState()
     state.messages.append(Message(role="user", content="hi"))
     builder = ContextBuilder(memory_store=store)
-    result = builder.build(state)
+    result = asyncio.run(builder.build(state))
     assert len(result.messages) == len(state.messages)

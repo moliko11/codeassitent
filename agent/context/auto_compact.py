@@ -23,7 +23,7 @@ SUMMARY_SYSTEM_PROMPT = (
 )
 
 
-def auto_compact(
+async def auto_compact(
     messages: list[Message],
     summarizer: Callable[[list[Message]], str],
     keep_recent_turns: int = 4,
@@ -47,7 +47,7 @@ def auto_compact(
     to_summarize = rest[:-keep_recent_turns] if keep_recent_turns > 0 else rest
     kept = rest[-keep_recent_turns:] if keep_recent_turns > 0 else []
 
-    summary_text = summarizer(to_summarize)
+    summary_text = await summarizer(to_summarize)
     summary_msg = Message(
         role="system",
         content=f"[之前的对话摘要]\n{summary_text}",
@@ -60,13 +60,13 @@ def make_summarizer(model_adapter) -> Callable[[list[Message]], str]:
 
     失败返回占位文本,不抛异常(避免摘要失败拖垮主流程)。
     """
-    def summarize(to_summarize: list[Message]) -> str:
+    async def summarize(to_summarize: list[Message]) -> str:
         try:
             req = ModelRequest(
                 messages=[Message(role="system", content=SUMMARY_SYSTEM_PROMPT)] + to_summarize,
                 model=getattr(model_adapter, "model", None),
             )
-            resp = model_adapter.call_llm(req)
+            resp = await model_adapter.call_llm(req)
             return resp.text or ""
         except Exception:
             return "[摘要失败,请基于最近消息继续]"

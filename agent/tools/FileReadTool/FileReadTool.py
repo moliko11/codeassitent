@@ -21,13 +21,21 @@ READ_SCHEMA = {
 
 @tool(
     name="read",
-    description="读文本文件,返回带行号的内容(cat -n 格式)。读后记录文件状态,Edit/Write 改该文件前必须先 Read。",
+    description=(
+        "读文本文件,返回 cat -n 带行号内容。默认读全文。"
+        "大文件(>300 行)务必用 offset+limit 分段读,不要一次性加载。"
+        "已经读过的文件不要重复全量读--如需回看用 offset 精确定位行号。"
+        "读后记录文件状态,Edit/Write 改该文件前必须先 Read。"
+    ),
     input_schema=READ_SCHEMA,
     returns="str: 带行号的内容",
     mutates_external=False,
 )
 def read(file_path, offset=None, limit=None):
-    path = Path(file_path).resolve()
+    ws = _runtime_state.workspace.get()
+    path = ws.resolve(file_path) if ws else Path(file_path).resolve()
+    if ws and not ws.allows(file_path):
+        raise PermissionError(f"路径不在工作空间允许集内: {file_path}")
     if not path.exists():
         raise FileNotFoundError(f"文件不存在: {path}")
     if path.is_dir():

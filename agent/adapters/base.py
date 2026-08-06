@@ -20,16 +20,37 @@ class BaseModelAdapter(ABC):
 
     provider: str = ""
 
+    @staticmethod
+    def _extract_cached_tokens(u) -> int:
+        """从 provider usage 对象提取 cached_tokens(各厂字段名不同,兼容取)。
+        DeepSeek: prompt_cache_hit_tokens;OpenAI Chat: prompt_tokens_details.cached_tokens;
+        豆包/Responses API: input_tokens_details.cached_tokens;其他: 顶层 cached_tokens。无则返 0。
+        注:cached 是 input 的子集(命中的缓存输入),命中率 = cached / input_tokens。"""
+        v = getattr(u, "prompt_cache_hit_tokens", None)       # DeepSeek
+        if v:
+            return int(v)
+        # OpenAI Chat: prompt_tokens_details;豆包/Responses: input_tokens_details(同结构,字段名不同)
+        for detail_attr in ("prompt_tokens_details", "input_tokens_details"):
+            pd = getattr(u, detail_attr, None)
+            if pd is not None:
+                v = getattr(pd, "cached_tokens", None)
+                if v:
+                    return int(v)
+        v = getattr(u, "cached_tokens", None)                 # 顶层(部分 provider)
+        if v:
+            return int(v)
+        return 0
+
     def __init__(self, api_key: str, base_url: str, model: str):
         self.api_key = api_key
         self.base_url = base_url
         self.model = model
 
     @abstractmethod
-    def call_llm(self, request: ModelRequest) -> ModelResponse:
+    async def call_llm(self, request: ModelRequest) -> ModelResponse:
         """ModelRequest(统一) -> provider请求 -> 调API -> ModelResponse(统一)"""
 
-    def stream_llm(self, request: ModelRequest, sink: EventSink) -> ModelResponse:
+    async def stream_llm(self, request: ModelRequest, sink: EventSink) -> ModelResponse:
         """流式调用 LLM：边收边把增量事件推给 sink，返回累积好的 ModelResponse。
 
         默认实现：退化为阻塞 call_llm，再把整包拆成事件一次性推给 sink。
@@ -38,7 +59,7 @@ class BaseModelAdapter(ABC):
         兼容性关键：不支持流式的 provider 与测试 mock 只需实现 call_llm，
         即可自动获得本方法 -> 流式对它们透明（只是「一次吐整段」而非逐 token）。
         """
-        resp = self.call_llm(request)
+        resp = await self.call_llm(request)
         if resp.text:
             sink.emit(TextDelta(text=resp.text))
         for i, tc in enumerate(resp.tool_calls):

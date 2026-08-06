@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 
 from ..registry import tool
+from .. import _runtime_state
 
 GREP_SCHEMA = {
     "type": "object",
@@ -24,12 +25,20 @@ GREP_SCHEMA = {
 
 @tool(
     name="grep",
-    description="正则搜索文件内容。output_mode: files_with_matches(默认)/content(带行号)/count。",
+    description=(
+        "正则搜索文件内容,定位代码位置。"
+        "探索未知代码库时:先用 output_mode=files_with_matches(默认)找出哪些文件命中,"
+        "再用 output_mode=content 看具体行--不要一上来就读整个文件。"
+        "output_mode: files_with_matches(路径列表)/content(带行号)/count。"
+    ),
     input_schema=GREP_SCHEMA,
     mutates_external=False,
 )
 def grep(pattern, path=".", glob=None, output_mode="files_with_matches"):
-    base = Path(path)
+    ws = _runtime_state.workspace.get()
+    if ws and not ws.allows(path):
+        raise PermissionError(f"路径不在工作空间允许集内: {path}")
+    base = ws.resolve(path) if ws else Path(path)
     regex = re.compile(pattern)
     # 收集待搜文件
     if base.is_file():

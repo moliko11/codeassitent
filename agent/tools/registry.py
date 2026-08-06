@@ -6,7 +6,7 @@ import time
 import jsonschema
 from jsonschema.exceptions import ValidationError
 
-from ..core.errors import ToolTimeoutError, classify_tool_error, ApprovalRequired
+from ..core.errors import ToolTimeoutError, classify_tool_error
 from ..reliability.retry import RetryPolicy
 from ..reliability.idempotency import IdempotencyStore
 from ..reliability.audit import AuditLogger
@@ -123,7 +123,7 @@ class ToolExecutor:
             gr = self.guardrail_runner.run("before_tool", call, gctx)
             if gr.action == "needs_approval":
                 # 阶段8 HITL:抛 ApprovalRequired,agentloop 捕获转 waiting_approval
-                raise ApprovalRequired(call, gr.reason)
+                return self._done(ToolResult(call_id=call.call_id, tool_name=call.tool_name, ok=False, error={"type": "NeedsApproval", "message": gr.reason, "retryable": False}, meta=call.meta), call, user_id, start_ts)
             if gr.action == "block":
                 blocked = ToolResult(call_id=call.call_id, tool_name=call.tool_name,
                     ok=False, error={"type": "GuardrailBlocked", "message": gr.reason, "retryable": False},
@@ -179,7 +179,7 @@ class ToolExecutor:
                     ok=False, error={"type": "GuardrailBlocked", "message": gr.reason, "retryable": False},
                     meta=call.meta)
             elif gr.action == "sanitize" and gr.sanitized is not None:
-                result.text = gr.sanitized
+                result = gr.sanitized   # ToolResultPIIGuard 返回改好 text+data 的 ToolResult(原地改 data,_finalize 再从 data 重算 text)
 
         # 7. 收尾
         return self._done(result, call, user_id, start_ts)
@@ -212,25 +212,33 @@ class ToolExecutor:
         return result
 
     # tools/registry.py -- execute_many 改 generator
-    def execute_many(self, calls, timeout=None, *, cancel_event=None, user_id=None, sink=None):
+    async def execute_many(self, calls, timeout=None, *, cancel_event=None, user_id=None, sink=None):
         """并行执行多个 tool_calls，按完成序 yield。有 depends_on 时按 DAG 层级并发。
 
         sink：可选 EventSink；传入则在每个工具开始/完成时发 ToolStart/ToolEnd。
         改 yield 后结果序=完成序（无妨：tool 结果按 call_id 匹配，不依赖顺序；live 与 replay 都用完成序，一致）。
         """
         if not any(c.depends_on for c in calls):
-            yield from self._parallel(calls, timeout, cancel_event=cancel_event, user_id=user_id, sink=sink)
+            async for r in self._parallel(calls, timeout, cancel_event=cancel_event, user_id=user_id, sink=sink):
+                yield r
         else:
-            yield from self._dag_execute(calls, timeout, cancel_event=cancel_event, user_id=user_id, sink=sink)
+            async for r in self._dag_execute(calls, timeout, cancel_event=cancel_event, user_id=user_id, sink=sink):
+                yield r
 
     def _run_with_timeout(self, handler, args, timeout, cancel_event):
         """单工具超时包装。timeout=None 不限时。超时抛 ToolTimeoutError（可重试）。"""
         from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+        import contextvars
         if timeout is None:
             return handler(**args)
         # ⚠️ 不用 with：with 退出会 shutdown(wait=True) 等孤儿线程，超时就废了
+        # 复制当前 context 进 pool 线程:ThreadPoolExecutor worker 启动时是 fresh 上下文,不继承
+        # ContextVar。若不复制,handler 看不到 _runtime_state 的 model_adapter/workspace/file_history/
+        # current_step_id(即使 agentloop/continue_loop 已 .set())-> WebFetch 坏、edit/write 跳权限校验、
+        # track_edit 拿不到 step_id。copy_context().run 让 handler 在调用方上下文里跑。
+        ctx = contextvars.copy_context()
         pool = ThreadPoolExecutor(max_workers=1)
-        fut = pool.submit(handler, **args)
+        fut = pool.submit(lambda: ctx.run(handler, **args))
         try:
             return fut.result(timeout=timeout)
         except FuturesTimeout:
@@ -239,34 +247,38 @@ class ToolExecutor:
             pool.shutdown(wait=False)   # 不等孤儿线程(它继续跑到结束)
 
     def _execute_with_retry(self, tool, call, timeout, cancel_event):
-        """单工具 retry 循环。llm_retry/无 policy 只跑一次；runtime_retry 按 policy 重试。"""
+        """单工具 retry 循环。llm_retry/无 policy 只跑一次；runtime_retry 按 policy 重试。
+        把实际尝试次数 attempts 写进 result.meta,_parallel 再带进 ToolEnd -> Tracer 写进 span attrs,
+        MetricsCollector 据 attrs["attempts"] 算 retry_count(否则恒 0,#6)。"""
         policy = self.retry_policy
 
-        def mk(ok, **kw):
+        def mk(ok, attempts=1, **kw):
             return ToolResult(call_id=call.call_id, tool_name=call.tool_name,
-                              meta=call.meta, ok=ok, **kw)
+                              meta={**call.meta, "attempts": attempts}, ok=ok, **kw)
 
         # llm_retry 或无 policy：只跑一次，失败交回 agentloop 回填模型
         if self.retry_mode != "runtime_retry" or policy is None:
             try:
-                return mk(True, data=self._run_with_timeout(tool.handler, call.arguments, timeout, cancel_event))
+                return mk(True, attempts=1, data=self._run_with_timeout(tool.handler, call.arguments, timeout, cancel_event))
             except Exception as e:
-                return mk(False, error=classify_tool_error(e))
+                return mk(False, attempts=1, error=classify_tool_error(e))
 
         # runtime_retry：重试循环
         last_err = None
+        attempts = 0
         for attempt in range(policy.max_attempts):
+            attempts = attempt + 1
             if cancel_event and cancel_event.is_set():
-                return mk(False, error={"type": "Cancelled", "message": "执行被取消", "retryable": False})
+                return mk(False, attempts=attempts, error={"type": "Cancelled", "message": "执行被取消", "retryable": False})
             try:
-                return mk(True, data=self._run_with_timeout(tool.handler, call.arguments, timeout, cancel_event))
+                return mk(True, attempts=attempts, data=self._run_with_timeout(tool.handler, call.arguments, timeout, cancel_event))
             except Exception as e:
                 last_err = classify_tool_error(e)
                 if not policy.should_retry(last_err) or attempt == policy.max_attempts - 1:
                     break                       # 不可重试 / 用尽次数
                 if cancel_event and cancel_event.wait(policy.backoff(attempt)):
-                    return mk(False, error={"type": "Cancelled", "message": "执行被取消", "retryable": False})
-        return mk(False, error=last_err)
+                    return mk(False, attempts=attempts, error={"type": "Cancelled", "message": "执行被取消", "retryable": False})
+        return mk(False, attempts=attempts, error=last_err)
 
     def _audit_before(self, call, user_id):
         """记开始时间；没配 audit_logger 返回 None。"""
@@ -298,51 +310,50 @@ class ToolExecutor:
                               meta={**call.meta, "via_fallback": True})
 
    # tools/registry.py -- _parallel 改 generator（删掉末尾的按序重组 return）
-    def _parallel(self, calls, timeout=None, *, cancel_event=None, user_id=None, sink=None):
-        """并行执行一组无依赖的 tool_calls，按完成序 yield。
-        streaming 层：as_completed（谁完成谁出）+ sink.emit(ToolStart/ToolEnd)。
-        ToolStart/ToolEnd 在本层发（而非 execute 内），超时杀 future 不与 execute 内事件重复。"""
-        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout, as_completed
+    async def _parallel(self, calls, timeout=None, *, cancel_event=None, user_id=None, sink=None):
+        """并行执行一组无依赖的 tool_calls，按完成序 yield(async,阶段10 Step 3)。
+        asyncio.to_thread 包同步 execute:继承 contextvar(多 subagent 隔离)。
+        streaming 层:as_completed + sink.emit(ToolStart/ToolEnd)。"""
+        import asyncio
         if not calls:
             return
         if sink:
             for c in calls:
                 sink.emit(ToolStart(
                     call_id=c.call_id, tool_name=c.tool_name, arguments=c.arguments))
-        with ThreadPoolExecutor(max_workers=min(len(calls), 8)) as pool:
-            fut_map = {pool.submit(self.execute, c, timeout=timeout,
-                                   cancel_event=cancel_event, user_id=user_id): c for c in calls}
-            for fut in as_completed(fut_map):
-                c = fut_map[fut]
-                try:
-                    r = fut.result(timeout=timeout)
-                    if sink:
-                        sink.emit(ToolEnd(
-                            call_id=r.call_id, tool_name=r.tool_name, ok=r.ok,
-                            error_type=(r.error or {}).get("type") if r.error else None,
-                            summary=_result_summary(r)))
-                    yield r
-                except FuturesTimeout:
-                    r = self._finalize(ToolResult(
-                        call_id=c.call_id, tool_name=c.tool_name, ok=False,
-                        error={"type": "StepTimeout", "message": f"工具执行超时（{timeout}s）", "retryable": True},
-                        meta=c.meta,
-                    ))
-                    if sink:
-                        sink.emit(ToolEnd(
-                            call_id=r.call_id, tool_name=r.tool_name, ok=False,
-                            error_type="StepTimeout", summary=r.error["message"]))
-                    yield r
+        sem = asyncio.Semaphore(8)
 
-    def _dag_execute(self, calls, timeout=None, *, cancel_event=None, user_id=None, sink=None):
-        """按 DAG 层级执行，每层并行、层级间串行，逐层 yield。"""
+        async def run_one(c):
+            async with sem:
+                return await asyncio.to_thread(self.execute, c, timeout=timeout,
+                                               cancel_event=cancel_event, user_id=user_id)
+
+        tasks = [asyncio.ensure_future(run_one(c)) for c in calls]
+        try:
+            for fut in asyncio.as_completed(tasks):
+                r = await fut
+                if sink:
+                    sink.emit(ToolEnd(
+                        call_id=r.call_id, tool_name=r.tool_name, ok=r.ok,
+                        error_type=(r.error or {}).get("type") if r.error else None,
+                        summary=_result_summary(r),
+                        attempts=(r.meta or {}).get("attempts", 1)))
+                yield r
+        except asyncio.CancelledError:
+            for t in tasks:
+                t.cancel()
+            raise
+
+    async def _dag_execute(self, calls, timeout=None, *, cancel_event=None, user_id=None, sink=None):
+        """按 DAG 层级执行，每层并行、层级间串行，逐层 yield(async)。"""
         done_ids: set[str] = set()
         remaining = list(calls)
         while remaining:
             layer = [c for c in remaining if all(d in done_ids for d in c.depends_on)]
             if not layer:
                 layer = remaining        # 有环：剩余的强制执行（防死锁）
-            yield from self._parallel(layer, timeout,
-                                      cancel_event=cancel_event, user_id=user_id, sink=sink)
+            async for r in self._parallel(layer, timeout,
+                                          cancel_event=cancel_event, user_id=user_id, sink=sink):
+                yield r
             done_ids.update(c.call_id for c in layer)
             remaining = [c for c in remaining if c.call_id not in done_ids]

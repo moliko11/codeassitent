@@ -2,7 +2,7 @@
 import json
 from typing import Any
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from ..core.messages import Message
 from ..core.models import ModelRequest, ModelResponse, TokenUsage
@@ -23,9 +23,9 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
 
     def __init__(self, api_key: str, base_url: str, model: str):
         super().__init__(api_key, base_url, model)
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
 
-    def call_llm(self, request: ModelRequest) -> ModelResponse:
+    async def call_llm(self, request: ModelRequest) -> ModelResponse:
         messages = self._to_chat_messages(request.messages)
         tools = self._to_chat_tools(request.tools)
 
@@ -46,10 +46,10 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
             kwargs["parallel_tool_calls"] = request.meta["parallel_tool_calls"]
         # TODO(阶段7): request.thinking_budget 透传 provider(DeepSeek enable_thinking/reasoning_budget?参数名待真实联调确认,暂不传避免 provider 拒绝)
 
-        response = self.client.chat.completions.create(**kwargs)
+        response = await self.client.chat.completions.create(**kwargs)
         return self._from_chat_response(response)
 
-    def stream_llm(self, request: ModelRequest, sink: EventSink) -> ModelResponse:
+    async def stream_llm(self, request: ModelRequest, sink: EventSink) -> ModelResponse:
         """Chat Completions 真流式：stream=True 逐 chunk 迭代，边收边推事件。
 
         - delta.content -> TextDelta（逐 token 文本）
@@ -80,7 +80,7 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
         if "parallel_tool_calls" in request.meta:
             kwargs["parallel_tool_calls"] = request.meta["parallel_tool_calls"]
 
-        stream = self.client.chat.completions.create(**kwargs)
+        stream = await self.client.chat.completions.create(**kwargs)
 
         text_parts: list[str] = []
         tool_acc: dict[int, dict[str, Any]] = {}  # index -> {call_id, name, args}
@@ -88,7 +88,7 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
         stop_reason: str | None = None
         response_id: str | None = None
 
-        for chunk in stream:
+        async for chunk in stream:
             if getattr(chunk, "id", None):
                 response_id = chunk.id
             # usage-only chunk（choices 为空）通常在流末尾
@@ -98,6 +98,7 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
                     input_tokens=getattr(u, "prompt_tokens", 0) or 0,
                     output_tokens=getattr(u, "completion_tokens", 0) or 0,
                     total_tokens=getattr(u, "total_tokens", 0) or 0,
+                    cached_tokens=self._extract_cached_tokens(u),
                 )
             choices = getattr(chunk, "choices", None) or []
             if not choices:
@@ -227,6 +228,7 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
                 input_tokens=getattr(response.usage, "prompt_tokens", 0) or 0,
                 output_tokens=getattr(response.usage, "completion_tokens", 0) or 0,
                 total_tokens=getattr(response.usage, "total_tokens", 0) or 0,
+                cached_tokens=self._extract_cached_tokens(response.usage),
             )
 
         return ModelResponse(

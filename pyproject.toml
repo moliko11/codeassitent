@@ -4,4 +4,10 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["openai", "jsonschema", "python-dotenv", "pytest", "httpx"]
+
+[tool.pytest.ini_options]
+# eval 的 coding_tasks 各 task 用 `from source import`(sibling),设计为 _verify_tasks.py 按任务
+# 隔离跑(subprocess cwd=task_dir)。一起 `pytest tests/` 收集会 test_source 模块名冲突 + source 冲突,
+# 故默认收集忽略 tests/eval;eval 走 `python tests/eval/_verify_tasks.py`。
+addopts = "--ignore=tests/eval"

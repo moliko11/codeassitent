@@ -8,6 +8,8 @@
 不依赖真实 LLM API。运行（从 code/ 目录，3.12 venv）：
     python -m pytest tests/test_persist.py -v
 """
+import asyncio
+
 import pytest
 
 from agent.agentloop import agentloop, continue_loop, _run_turn, _emit_run_end
@@ -51,7 +53,7 @@ class _ScriptedAdapter(BaseModelAdapter):
         self.i = 0
         self.call_count = 0
 
-    def call_llm(self, request):
+    async def call_llm(self, request):
         self.call_count += 1
         resp = self.script[self.i]
         self.i += 1
@@ -125,7 +127,7 @@ def test_replay_no_llm_call():
         ModelResponse(tool_calls=[ToolCall(call_id="c1", tool_name="echo", arguments={"x": 1})]),
         ModelResponse(text="done"),
     ])
-    live_state = agentloop("hi", _ctx(reg, live_adapter))
+    live_state = asyncio.run(agentloop("hi", _ctx(reg, live_adapter)))
     run_id = live_state.run_id
 
     assert live_state.status == "completed"
@@ -179,7 +181,7 @@ def test_resume_no_replay_of_done_tools():
     assert tool_calls == []                       # resume 没重跑任何工具
 
     # continue_loop 续跑
-    state2 = continue_loop(state, _ctx(reg, adapter, state=state))
+    state2 = asyncio.run(continue_loop(state, _ctx(reg, adapter, state=state)))
 
     # 断言：只跑了续跑的新工具 c3，c1/c2 未被重调
     assert len(tool_calls) == 1
@@ -215,7 +217,7 @@ def test_resume_pending_per_call_id():
     assert adapter.call_count == 0
     assert tool_calls == []                       # resume 没执行任何工具
 
-    state2 = continue_loop(state, _ctx(reg, adapter, state=state))
+    state2 = asyncio.run(continue_loop(state, _ctx(reg, adapter, state=state)))
 
     # 断言：c2 被重跑（无 result 记录），c1 未被重跑（有录好的 result 充当幂等表）
     assert len(tool_calls) == 1
@@ -279,14 +281,14 @@ def test_repl_session_single_transcript():
     s1 = AgentState(run_id=run_id, max_steps=10)
     s1.messages = messages
     ctx1 = _ctx(reg, adapter, state=s1)
-    s1 = _run_turn("msg-1", s1, ctx1, p)
+    s1 = asyncio.run(_run_turn("msg-1", s1, ctx1, p))
     _emit_run_end(s1, ctx1.sink)          # 每轮只发 UI 事件，不 log_run_end
     messages = s1.messages                 # REPL 同步（bug2：append 返回 copy，需同步回 messages）
     # 轮 2（共用 run_id + messages + persister）
     s2 = AgentState(run_id=run_id, max_steps=10)
     s2.messages = messages
     ctx2 = _ctx(reg, adapter, state=s2)
-    s2 = _run_turn("msg-2", s2, ctx2, p)
+    s2 = asyncio.run(_run_turn("msg-2", s2, ctx2, p))
     _emit_run_end(s2, ctx2.sink)
     messages = s2.messages
     # session 退出：才写 run_end（用最后一轮 status）
@@ -334,7 +336,7 @@ def test_resume_multi_turn_continue():
     assert tool_calls == []                       # resume 没执行工具
     assert not state.is_terminal()                # 修复①：中间轮 final 不设终态
 
-    state2 = continue_loop(state, _ctx(reg, adapter, state=state))
+    state2 = asyncio.run(continue_loop(state, _ctx(reg, adapter, state=state)))
     # 修复②：step_index 重置后能续跑；只重跑 c2（pending），c1 不重跑（有 result）；然后 final
     assert len(tool_calls) == 1
     assert tool_calls[0] == {"x": 2}
@@ -353,7 +355,7 @@ def test_final_enters_messages():
     run_id = "t-final-in-msg"
     p = Persister(run_id)
     s = AgentState(run_id=run_id, max_steps=10)
-    s = _run_turn("hi", s, _ctx(reg, adapter, state=s), p)
+    s = asyncio.run(_run_turn("hi", s, _ctx(reg, adapter, state=s), p))
     p.close()
     # final 回复进了 messages（修复前只有 user）
     roles = [getattr(m, "role", None) for m in s.messages]
@@ -376,13 +378,13 @@ def test_repl_cross_turn_context():
     # 轮1：CALL_TOOLS（append_assistant 返回新 list，state.messages 离开共享 messages 对象）
     s1 = AgentState(run_id=run_id, max_steps=10)
     s1.messages = messages
-    s1 = _run_turn("msg-1", s1, _ctx(reg, adapter, state=s1), p)
+    s1 = asyncio.run(_run_turn("msg-1", s1, _ctx(reg, adapter, state=s1), p))
     messages = s1.messages   # ← REPL 同步（去掉这行就复现 bug2：轮2 看不到轮1 的 assistant/tool）
 
     # 轮2：final
     s2 = AgentState(run_id=run_id, max_steps=10)
     s2.messages = messages
-    s2 = _run_turn("msg-2", s2, _ctx(reg, adapter, state=s2), p)
+    s2 = asyncio.run(_run_turn("msg-2", s2, _ctx(reg, adapter, state=s2), p))
     p.close()
 
     # 轮2 的 messages 含轮1 的 assistant + tool_result（跨轮不丢）
@@ -391,3 +393,82 @@ def test_repl_cross_turn_context():
     assert "tool" in roles               # 轮1 的 tool_result
     assert any(getattr(m, "content", None) == "msg-1"
                for m in s2.messages if getattr(m, "role", None) == "user")
+
+
+# ───────────────────────── P0 回归 ─────────────────────────
+
+def test_continue_loop_inits_runtime_state(tmp_path):
+    """#1: continue_loop(resume 续跑)须初始化 _runtime_state(model_adapter/workspace/file_history),
+    与 agentloop/run_agent_loop 正常入口对齐。否则 resume 后工具读 _runtime_state 全 None:
+    WebFetch 坏、edit/write 跳权限校验、无备份/rewind、read_file_state 空 -> Edit 报"先读后改"。
+
+    _runtime_state 是 ContextVar,set 发生在 continue_loop 的 task 内,asyncio.run 返回后不回漏到
+    调用方上下文;故用 probe 工具在 _execute_pending 内采样(asyncio.to_thread 复制 context,task 内
+    的 set 对 handler 可见),验证"续跑期间工具能看到三件套"这一真正的修复目标。"""
+    from agent.tools import _runtime_state
+    from agent.core.workspace import Workspace
+    run_id = "t-resume-rt"
+    seen: dict = {}
+
+    def probe(**kwargs):
+        seen["model_adapter"] = _runtime_state.model_adapter.get()
+        seen["workspace"] = _runtime_state.workspace.get()
+        seen["file_history"] = _runtime_state.file_history.get()
+        return {"probed": True}
+
+    reg = ToolRegistry()
+    reg.register(Tool(
+        tool_spec=ToolSpec(name="probe", description="采样 _runtime_state",
+                           input_schema={"type": "object"}),
+        handler=probe,
+    ))
+    # 崩在 probe 执行中:assistant 请求 probe,无 result,无 run_end -> resume 标 pending=[probe]
+    _seed(run_id, [
+        ("log_user", "hi"),
+        ("log_assistant", ModelResponse(tool_calls=[
+            ToolCall(call_id="c1", tool_name="probe", arguments={})])),
+        # c1 无 result -- 崩在 probe 执行中
+    ])
+    adapter = _ScriptedAdapter([ModelResponse(text="done")])  # pending 跑完后直接 final
+    config = AgentConfig(max_steps=10, system_prompt="")
+    state = resume(run_id, config, adapter)
+    assert [c.call_id for c in state.pending_tool_calls] == ["c1"]
+
+    ws = Workspace(root=tmp_path)
+    ctx = RuntimeContext(
+        registry=reg, tool_executor=ToolExecutor(reg),
+        model_adapter=adapter, config=config, state=state,
+        sink=NullSink(), persist=True, workspace=ws,
+    )
+    state2 = asyncio.run(continue_loop(state, ctx))
+    # probe 在 _execute_pending 内采样到三件套均已注入(修复前全 None -> resume 后工具全失效)
+    assert seen["model_adapter"] is adapter
+    assert seen["workspace"] is ws
+    assert seen["file_history"] is not None
+    assert state2.status == "completed"
+
+
+def test_error_backfill_hint_persisted():
+    """#11: 可重试错误回填的合成 user 提示须落盘(durability-first),否则 resume 全重放丢失,
+    live 与 replayed messages 不一致。修复前只 state.messages.append 不走 persister.log_user。"""
+    reg, _ = _echo_registry()
+
+    class _FlakyAdapter(_ScriptedAdapter):
+        async def call_llm(self, request):
+            self.call_count += 1
+            if self.call_count == 1:
+                raise ConnectionError("simulated LLM hang")  # 无 status_code -> 可重试
+            return ModelResponse(text="done")
+
+    adapter = _FlakyAdapter([])
+    run_id = "t-err-backfill"
+    p = Persister(run_id)
+    s = AgentState(run_id=run_id, max_steps=10)
+    s = asyncio.run(_run_turn("hi", s, _ctx(reg, adapter, state=s), p))
+    p.close()
+    assert s.status == "completed"
+    recs = list(read_transcript(run_id))
+    # 错误回填提示作为 user 消息落盘(修复前 resume 重放会丢这条)
+    err_hints = [r for r in recs if r["type"] == "user"
+                 and "上一步执行失败" in r.get("content", "")]
+    assert len(err_hints) == 1

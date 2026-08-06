@@ -26,7 +26,7 @@ WRITE_SCHEMA = {
     mutates_external=True,   # 走 before_mutation -> trackEdit 备份
 )
 def write(file_path, content):
-    ws = _runtime_state.workspace
+    ws = _runtime_state.workspace.get()
     path = ws.resolve(file_path) if ws else Path(file_path).resolve()
     if ws and not ws.allows(file_path):
         raise PermissionError(f"路径不在工作空间允许集内: {file_path}")

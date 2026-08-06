@@ -6,14 +6,15 @@ from ..core.state import _ser   # 复用,_ser 已跳 raw
 class Persister:
     """消息级事实落盘。完整消息 append 到 transcript.jsonl。
     和 streaming sink 独立:deltas->printer(临时);本类->transcript(真相)。"""
-    def __init__(self, run_id: str):
-        """run_id: transcript.jsonl 的唯一标识"""
+    def __init__(self, run_id: str, agent_id=None):
+        """run_id: transcript.jsonl 的唯一标识;agent_id: 标记记录来源(子 agent 落主 transcript 时="subagent")"""
         self._run_id = run_id
+        self.agent_id = agent_id   # None=主 agent;子 agent 落盘时设 "subagent"(web 据此区分展示)
         self._fh = open(transcript_path(run_id), "a", encoding="utf-8")
 
     def _append(self, rec: dict):
-        
-        rec = {"run_id": self._run_id, "ts": time.perf_counter(), **rec}
+        rec = {"run_id": self._run_id, "ts": time.perf_counter(),
+               "agent_id": self.agent_id, **rec}
         self._fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
         self._fh.flush()   # 消息级写频低,sync flush 即可(CC 用批写是因高频)
 

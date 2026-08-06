@@ -2,7 +2,7 @@
 from .defs import Tool, ToolCall, ToolResult, ToolSpec
 from .registry import ToolExecutor, ToolRegistry, registry, tool
 from . import builtin  # 触发内置工具注册到 registry
-from . import test_tools  # 触发测试工具注册（tavily/读文件/grep）到 registry
+from . import sample_tools  # 触发测试工具注册（tavily/读文件/grep）到 registry
 from . import FileReadTool    # 触发 read 注册
 from . import FileEditTool    # 触发 edit 注册
 from . import FileWriteTool   # 触发 write 注册

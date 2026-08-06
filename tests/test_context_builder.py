@@ -3,6 +3,8 @@
 不依赖真实 LLM。运行(从 code/ 目录，3.12 venv)：
     python -m pytest tests/test_context_builder.py -v
 """
+import asyncio
+
 from agent.context import ContextBuilder, count_message_tokens, estimate_text_tokens
 from agent.core.messages import Message
 from agent.core.state import AgentState
@@ -35,7 +37,7 @@ def test_builder_passthrough_does_not_mutate_state():
     """透传：build 返回的 messages 与 state.messages 内容一致，且不改原始 list。"""
     s = _state_with_messages(3)
     builder = ContextBuilder(context_budget=None)
-    result = builder.build(s)
+    result = asyncio.run(builder.build(s))
     assert len(result.messages) == 3
     assert result.token_count > 0
     assert result.over_budget is False  # budget=None 不限
@@ -51,7 +53,7 @@ def test_builder_over_budget_flags_but_does_not_trim():
         context_budget=50,  # 故意设很小
         warn_sink=lambda m: warned.append(m),
     )
-    result = builder.build(s)
+    result = asyncio.run(builder.build(s))
     assert result.over_budget is True
     assert len(result.messages) == 10  # 没裁剪，仍 10 条
     assert len(warned) == 1 and "over budget" in warned[0]
@@ -71,7 +73,7 @@ def test_builder_injected_via_runtimecontext_runs_agentloop():
         """只回一次 final answer 的最简 adapter。"""
         def __init__(self):
             super().__init__(api_key="", base_url="", model="")
-        def call_llm(self, request):
+        async def call_llm(self, request):
             return ModelResponse(text="ok")
         def append_assistant(self, messages, resp):
             return [*messages, Message(role="assistant", content=resp.text or "")]
@@ -88,5 +90,5 @@ def test_builder_injected_via_runtimecontext_runs_agentloop():
         state=AgentState(),
         context_builder=builder,  # 注入
     )
-    s = agentloop("hi", ctx)
+    s = asyncio.run(agentloop("hi", ctx))
     assert s.status == "completed"

@@ -1,0 +1,9 @@
+﻿--- a/blog/search.py
++++ b/blog/search.py
+@@ -4,5 +4,5 @@
+     results = []
+     for post in store.all():
+-        if keyword in post.content:
++        if keyword in post.tags:
+             results.append(post)
+     return results

@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>ez-interview 监控后台</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; margin: 20px; background: #f7f7f8; color: #222; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 18px 0 8px; }
+  .cards { display: flex; gap: 12px; flex-wrap: wrap; margin: 14px 0; }
+  .card { background: #fff; padding: 12px 16px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,.08); min-width: 110px; }
+  .card .v { font-size: 22px; font-weight: 600; }
+  .card .l { font-size: 12px; color: #666; }
+  table { border-collapse: collapse; width: 100%; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #eee; font-size: 13px; }
+  th { background: #f0f0f2; }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: #f5f8ff; }
+  .badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; }
+  .b-completed { background: #d4edda; color: #155724; }
+  .b-failed, .b-max_steps_exceeded { background: #f8d7da; color: #721c24; }
+  .b-running, .b-waiting_tool, .b-waiting_approval { background: #fff3cd; color: #856404; }
+  .b-unknown, .b-cancelled { background: #e2e3e5; color: #383d41; }
+  .flame { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+  .span { height: 22px; margin: 2px 0; border-radius: 3px; color: #fff; padding: 3px 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .t-run { background: #6366f1; }
+  .t-step { background: #10b981; }
+  .t-tool { background: #f59e0b; }
+  .agent-sub { border-left: 3px solid #ef4444; }   /* 子 agent span(task 工具派的)标红边 */
+  .t-guardrail { background: #ef4444; }
+  .t-approval { background: #8b5cf6; }
+  .meta-grid { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 12px 0; font-size: 13px; }
+  .meta-grid dt { color: #666; }
+  .link { color: #2563eb; cursor: pointer; }
+  .dim { color: #888; font-size: 12px; }
+  .msg { font-family: ui-monospace, Consolas, monospace; font-size: 12px; line-height: 1.6; }
+  .msg b { color: #555; }
+</style>
+</head>
+<body>
+<div id="app"><div class="dim">加载中…</div></div>
+<script>
+async function get(url){ const r = await fetch(url); if(!r.ok) throw new Error(url+' -> '+r.status); return r.json(); }
+function esc(s){ return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function badge(status){ return `<span class="badge b-${esc(status)}">${esc(status)}</span>`; }
+function fmtTs(ts){ if(!ts||ts<=0) return '-'; const d=new Date(ts*1000); return isNaN(d)? '-' : d.toLocaleString(); }
+function fmtDur(ms){ if(!ms&&ms!==0) return '-'; if(ms<1000) return Math.round(ms)+'ms'; return (ms/1000).toFixed(1)+'s'; }
+function _rate(c, i){ return i ? Math.round(c*100/i)+'%' : '-'; }
+function pre(s){ return `<pre style="white-space:pre-wrap;margin:6px 0 0;font-size:12px;font-family:ui-monospace,Consolas,monospace;line-height:1.5">${esc(s)}</pre>`; }
+function splitSections(text){
+  const intro=[], sections=[]; let cur=null;
+  for(const line of (text||'').split('\n')){
+    if(line.startsWith('## ')){ if(cur) sections.push(cur); cur={title:line.slice(3).trim(),body:[]}; }
+    else if(cur===null) intro.push(line);
+    else cur.body.push(line);
+  }
+  if(cur) sections.push(cur);
+  return {intro: intro.join('\n').trim(), sections: sections.map(s=>({title:s.title,body:s.body.join('\n').trim()}))};
+}
+
+async function dashboard(){
+  const [stats, runs] = await Promise.all([get('/api/stats'), get('/api/runs')]);
+  const cards = [
+    ['总输入', stats.total_token_input], ['总输出', stats.total_token_output], ['总 token', stats.total_token],
+    ['总缓存', stats.total_token_cached], ['平均命中率', (stats.avg_cache_hit_rate*100).toFixed(0)+'%'],
+    ['Run 数', stats.run_count], ['平均成功率', (stats.avg_tool_success_rate*100).toFixed(0)+'%'],
+  ];
+  const byModel = Object.entries(stats.by_model||{}).map(([m,v])=>`${esc(m)}: ${v.token}tok/${v.runs}run`).join(' · ');
+  const rows = runs.map(r=>`<tr onclick="location.hash='#/run/${encodeURIComponent(r.run_id)}'">
+    <td title="${esc(r.run_id)}">${esc(r.run_id.slice(0,8))}…</td>
+    <td>${badge(r.status)}</td><td>${esc(r.model)}</td>
+    <td>${r.token_input}</td><td>${r.token_output}</td><td>${r.token_total}</td><td>${r.tool_count}</td>
+    <td>${(r.tool_success_rate*100).toFixed(0)}%</td>
+    <td>${fmtDur(r.duration_ms)}</td><td>${fmtTs(r.started_at)}</td></tr>`).join('');
+  app().innerHTML = `
+    <h1>📊 监控 Dashboard <a class=link style="font-size:13px;font-weight:400" onclick="location.hash='#/prompt'">📝 系统提示词分层 ›</a></h1>
+    <div class="cards">${cards.map(c=>`<div class="card"><div class="v">${c[1]}</div><div class="l">${c[0]}</div></div>`).join('')}</div>
+    <div class="dim">按 model:${byModel||'-'}</div>
+    <h2>会话列表(${runs.length})</h2>
+    <table><thead><tr><th>run_id</th><th>状态</th><th>model</th><th>输入</th><th>输出</th><th>总</th><th>工具数</th><th>成功率</th><th>耗时</th><th>开始时间</th></tr></thead>
+    <tbody>${rows||'<tr><td colspan=10 class=dim>无 run(先跑一个:python -m agent.agentloop,exit 退出)</td></tr>'}</tbody></table>`;
+}
+
+async function runDetail(runId){
+  const [detail, trace] = await Promise.all([
+    get('/api/runs/'+encodeURIComponent(runId)),
+    get('/api/runs/'+encodeURIComponent(runId)+'/trace').catch(e=>null),   // 无 trace 不阻断
+  ]);
+  const meta = detail.meta, rep = detail.report;
+  // 火焰图:按 parent_id 建树,嵌套条,宽 ∝ duration_ms(相对 run 总时长);子 agent span(agent_id)标红边
+  const spans = (trace&&trace.spans)||[];
+  const byParent = {};
+  spans.forEach(s=>{ (byParent[s.parent_id] = byParent[s.parent_id]||[]).push(s); });
+  const runDur = Math.max(...spans.map(s=>s.duration_ms||0), 1);
+  // 工具数按 agent 拆:无 agent_id=主循环,有=子 agent(task 工具派的)
+  const _toolSpans = spans.filter(s=>s.type==='tool');
+  const mainTools = _toolSpans.filter(s=>!(s.attrs&&s.attrs.agent_id)).length;
+  const subTools = _toolSpans.filter(s=>s.attrs&&s.attrs.agent_id).length;
+  function render(parentId, depth){
+    return (byParent[parentId]||[]).map(s=>{
+      const w = Math.max((s.duration_ms||0)/runDur*100, 3);
+      const u = s.attrs&&s.attrs.usage ? ` · in${s.attrs.usage.input_tokens}/out${s.attrs.usage.output_tokens}` : '';
+      const aid = s.attrs&&s.attrs.agent_id;
+      const agentMark = aid ? ` <span style="color:#ef4444">[子]</span>` : '';
+      const cls = `span t-${s.type}${aid?' agent-sub':''}`;
+      const lbl = `${s.type} ${esc(s.name)}${agentMark} · ${fmtDur(s.duration_ms)}${u}`;
+      return `<div class="${cls}" style="margin-left:${depth*16}px;width:${w}%" title="${lbl}">${lbl}</div>${render(s.span_id, depth+1)}`;
+    }).join('');
+  }
+  const flame = spans.length ? `<div class="flame">${render(null,0)}</div>` : '<div class="dim">无 trace(崩了没 RunEnd,坑2;或 run 还在跑)</div>';
+  const repExtra = rep ? `
+    <dt>平均 latency</dt><dd>${fmtDur(rep.avg_tool_latency_ms)}</dd>
+    <dt>超时 / 重试</dt><dd>${rep.timeout_count} / ${rep.retry_count}</dd>` : '<dt>trace 详情</dt><dd class=dim>无 trace(REPL run 无 trace.jsonl,仅 run_meta 摘要)</dd>';
+  // 本会话系统提示词(按 run 存,分层展示)
+  const sp = splitSections(meta.system_prompt||'');
+  const spHtml = sp.sections.length ? `<details style="margin-top:14px"><summary style="cursor:pointer;font-weight:600;color:#333">📝 本会话系统提示词(${sp.sections.length} 段)</summary>
+      <div class="card" style="background:#fffbe6;border-left:3px solid #f59e0b;margin-top:8px"><div class="l" style="font-weight:600">引言</div>${pre(sp.intro)}</div>
+      <div style="display:flex;flex-direction:column;gap:8px;margin-top:8px">${sp.sections.map((s,i)=>`<div class="card" style="border-left:3px solid #6366f1"><div class="l" style="font-weight:600">${i+1}. ${esc(s.title)}</div>${pre(s.body)}</div>`).join('')}</div></details>` : '<div class=dim style="margin-top:14px">无系统提示词(旧 run 无此字段)</div>';
+  // transcript 末尾片段(再发一个请求,避免详情页阻塞)
+  let tHtml = '<div class="dim">加载中…</div>';
+  app().innerHTML = `
+    <a class="link" onclick="location.hash='#/'">← 返回</a>
+    <h1>Run ${esc(runId.slice(0,8))}…</h1>
+    <dl class="meta-grid">
+      <dt>状态 / model</dt><dd>${badge(meta.status)} ${esc(meta.model)}</dd>
+      <dt>耗时 / 开始</dt><dd>${fmtDur(meta.duration_ms)} · ${fmtTs(meta.started_at)}</dd>
+      <dt>token (入/出/缓存/总)</dt><dd>${meta.token_input} / ${meta.token_output} / ${meta.token_cached}(${_rate(meta.token_cached, meta.token_input)}) / ${meta.token_total}</dd>
+      <dt>steps / tools</dt><dd>${meta.step_count} / ${meta.tool_count}${subTools>0?` <span class=dim>(主${mainTools}/子${subTools})</span>`:''}</dd>
+      <dt>成功率</dt><dd>${(meta.tool_success_rate*100).toFixed(0)}%</dd>
+      ${repExtra}
+    </dl>
+    <h2>火焰图(span 树,宽∝耗时)</h2>${flame}
+    <h2>消息流(末尾)</h2><div class="msg" id="tbox">${tHtml}</div>
+    ${spHtml}`;
+  try {
+    const recs = await get('/api/runs/'+encodeURIComponent(runId)+'/transcript?limit=100000');
+    tHtml = recs.map(r=>{
+      const badge = r.agent_id ? `<span class=dim style="color:#f59e0b">[${esc(r.agent_id)}]</span> ` : '';
+      if(r.type==='user') return `<div>${badge}<b>user:</b> ${esc(r.content)}</div>`;
+      if(r.type==='assistant'){
+        const tcs = r.tool_calls||[];
+        // >1 个 tool_call = 并行批次(execute_many 同轮并发),标出来
+        const batch = tcs.length > 1
+          ? `<div class=dim style="color:#f59e0b">  ┌ 并行 ${tcs.length} 个: [${tcs.map(tc=>esc(tc.tool_name||'')).join(', ')}]</div>`
+          : '';
+        const tcsHtml = tcs.map(tc=>{
+          const args = tc.arguments ? JSON.stringify(tc.arguments) : '';
+          return `<div class=dim>  ⏺ ${esc(tc.tool_name||'')}(<span style="color:#6366f1">${esc(args)}</span>)</div>`;
+        }).join('');
+        return `<div>${badge}<b>assistant:</b> ${esc(r.text||'(仅工具调用)')}</div>${batch}${tcsHtml}`;
+      }
+      if(r.type==='tool_result'){
+        const res = r.result||{};
+        const summ = res.text || (res.data ? JSON.stringify(res.data) : '');
+        return `<div class=dim>${badge}  ⎿ ${esc(res.tool_name||'')} ${res.ok?'✓':'✗'} ${esc(summ).slice(0,100)}</div>`;
+      }
+      if(r.type==='run_end') return `<div class=dim>${badge}<b>run_end:</b> ${esc(r.status)}</div>`;
+      return '';
+    }).join('') || '<div class=dim>无消息</div>';
+  } catch(e){ tHtml = '<div class=dim>'+esc(e.message)+'</div>'; }
+  const tbox = document.getElementById('tbox'); if(tbox) tbox.innerHTML = tHtml;
+}
+
+async function promptView(){
+  const d = await get('/api/system_prompt');
+  const secs = d.sections.map((s,i)=>`<div class="card" style="min-width:300px;max-width:780px;border-left:3px solid #6366f1">
+    <div class="l" style="font-weight:600;color:#333">${i+1}. ${esc(s.title)}</div>${pre(s.body)}</div>`).join('');
+  app().innerHTML = `
+    <a class=link onclick="location.hash='#/'">← 返回 Dashboard</a>
+    <h1>📝 系统提示词(首轮加载,分层)</h1>
+    <div class="dim">共 ${d.sections.length} 段 · 源:AgentConfig().system_prompt</div>
+    <div class="card" style="min-width:300px;max-width:780px;background:#fffbe6;border-left:3px solid #f59e0b">
+      <div class="l" style="font-weight:600;color:#333">引言</div>${pre(d.intro)}</div>
+    <div style="display:flex;flex-direction:column;gap:10px;margin-top:10px">${secs}</div>`;
+}
+
+function app(){ return document.getElementById('app'); }
+function route(){
+  const h = location.hash||'#/';
+  let p;
+  if(h==='#/prompt') p = promptView();
+  else { const m = h.match(/^#\/run\/(.+)$/); p = m ? runDetail(decodeURIComponent(m[1])) : dashboard(); }
+  p.catch(e=>app().innerHTML='<pre style="color:#c00">'+esc(e.message)+'</pre>');
+}
+window.addEventListener('hashchange', route);
+route();
+</script>
+</body>
+</html>

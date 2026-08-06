@@ -4,6 +4,7 @@
 不依赖真实 LLM。fileHistory 是纯 stdlib 底座,直接构造测;
 工具测试直接调 tool.handler(...)(不经 executor,快);备份联动测试走 ToolExecutor + before_mutation。
 """
+import asyncio
 import os
 import time
 
@@ -284,6 +285,24 @@ def test_edit_replace_all(tmp_path):
     assert a.read_text(encoding="utf-8") == "baz bar baz"
 
 
+def test_edit_rejects_empty_old_string(tmp_path):
+    """#13: 空 old_string 守卫--否则 content.replace("",new) 在每字符间插入,静默损坏整文件
+    (count("")=len+1;replace_all=True 时 'hello'.replace('','X')='XhXeXlXlXoX')。对标 CC 拒绝空 old_string。"""
+    a = tmp_path / "a.txt"; a.write_text("hello", encoding="utf-8")
+    _tool("read").handler(file_path=str(a))   # 先读,过"先读后改"闸门,证明守卫在其后仍拦住
+    with pytest.raises(ValueError, match="empty"):
+        _tool("edit").handler(file_path=str(a), old_string="", new_string="X", replace_all=True)
+    assert a.read_text(encoding="utf-8") == "hello"   # 文件未被破坏
+
+
+def test_edit_rejects_same_old_new(tmp_path):
+    """#13: old==new 是无意义替换,守卫拒绝。"""
+    a = tmp_path / "a.txt"; a.write_text("hello", encoding="utf-8")
+    _tool("read").handler(file_path=str(a))
+    with pytest.raises(ValueError, match="differ"):
+        _tool("edit").handler(file_path=str(a), old_string="hello", new_string="hello")
+
+
 def test_edit_single_replace_updates_state(tmp_path):
     """正常单次替换成功 + 更新 read_file_state(新内容 + 新 mtime)。"""
     a = tmp_path / "a.txt"; a.write_text("hello", encoding="utf-8")
@@ -482,7 +501,7 @@ class _ScriptedAdapter(BaseModelAdapter):
         super().__init__(api_key="", base_url="", model="")
         self.script = list(script)
 
-    def call_llm(self, request):
+    async def call_llm(self, request):
         if self.script:
             return self.script.pop(0)
         return ModelResponse(text="done")
@@ -498,7 +517,7 @@ def test_integration_read_edit_rewind(tmp_path):
     """集成闭环:Read -> Edit -> rewind 回原版(经 agentloop + before_mutation + make_snapshot)。"""
     a = tmp_path / "a.txt"; a.write_text("原版", encoding="utf-8")
     fh = FileHistory(tmp_path / "fh")
-    _runtime_state.file_history = fh
+    _runtime_state.file_history.set(fh)
     adapter = _ScriptedAdapter([
         ModelResponse(text=None, tool_calls=[ToolCall(call_id="c1", tool_name="read",
             arguments={"file_path": str(a)})]),
@@ -509,7 +528,7 @@ def test_integration_read_edit_rewind(tmp_path):
     executor = ToolExecutor(registry, before_mutation=_track_edit_callback)
     ctx = RuntimeContext(registry=registry, model_adapter=adapter, tool_executor=executor,
                          config=AgentConfig(max_steps=5), state=AgentState())
-    agentloop("改一下", ctx)
+    asyncio.run(agentloop("改一下", ctx))
     assert a.read_text(encoding="utf-8") == "改后"
     fh.rewind(INITIAL_STEP_ID)   # make_snapshot 已在每步末调,rewind 回原版
     assert a.read_text(encoding="utf-8") == "原版"
@@ -519,7 +538,7 @@ def test_integration_write_new_file_rewind_deletes(tmp_path):
     """集成闭环:Write 新文件 -> rewind -> 文件被删(null backup,经 agentloop)。"""
     a = tmp_path / "new.txt"
     fh = FileHistory(tmp_path / "fh")
-    _runtime_state.file_history = fh
+    _runtime_state.file_history.set(fh)
     adapter = _ScriptedAdapter([
         ModelResponse(text=None, tool_calls=[ToolCall(call_id="c1", tool_name="write",
             arguments={"file_path": str(a), "content": "新建内容"})]),
@@ -528,7 +547,7 @@ def test_integration_write_new_file_rewind_deletes(tmp_path):
     executor = ToolExecutor(registry, before_mutation=_track_edit_callback)
     ctx = RuntimeContext(registry=registry, model_adapter=adapter, tool_executor=executor,
                          config=AgentConfig(max_steps=5), state=AgentState())
-    agentloop("建文件", ctx)
+    asyncio.run(agentloop("建文件", ctx))
     assert a.exists()
     assert a.read_text(encoding="utf-8") == "新建内容"
     fh.rewind(INITIAL_STEP_ID)   # null backup -> unlink
@@ -539,7 +558,7 @@ def test_integration_read_edit_bash_rewind(tmp_path):
     """完整闭环:Read -> Edit -> Bash 验证 -> rewind 回原版(对标 CC 自主改码 + 回滚)。"""
     a = tmp_path / "a.txt"; a.write_text("version=1", encoding="utf-8")
     fh = FileHistory(tmp_path / "fh")
-    _runtime_state.file_history = fh
+    _runtime_state.file_history.set(fh)
     adapter = _ScriptedAdapter([
         ModelResponse(text=None, tool_calls=[ToolCall(call_id="c1", tool_name="read",
             arguments={"file_path": str(a)})]),
@@ -552,7 +571,7 @@ def test_integration_read_edit_bash_rewind(tmp_path):
     executor = ToolExecutor(registry, before_mutation=_track_edit_callback)
     ctx = RuntimeContext(registry=registry, model_adapter=adapter, tool_executor=executor,
                          config=AgentConfig(max_steps=6), state=AgentState())
-    agentloop("改并验证", ctx)
+    asyncio.run(agentloop("改并验证", ctx))
     assert a.read_text(encoding="utf-8") == "version=2"
     fh.rewind(INITIAL_STEP_ID)
     assert a.read_text(encoding="utf-8") == "version=1"
@@ -589,22 +608,22 @@ def test_web_search_formats_results(monkeypatch):
 
 
 def test_web_search_network_error(monkeypatch):
-    """mock 网络错误 -> 返回结构化 error,不抛。"""
+    """mock 网络错误 -> raise ConnectionError(可重试,进可靠性管道),不再 return dict 被标 ok=True。"""
     import httpx
 
     def boom(*a, **k):
         raise httpx.HTTPError("boom")
     monkeypatch.setattr(httpx, "post", boom)
     monkeypatch.setenv("TAVILY_API_KEY", "fake")
-    r = _tool("web_search").handler(query="test")
-    assert isinstance(r, dict) and "error" in r
+    with pytest.raises(ConnectionError):
+        _tool("web_search").handler(query="test")
 
 
 # ============ WebFetch 工具(步3,httpx + LLM 提取)============
 
 class _MockAdapter:
     """WebFetch 测试用:call_llm 返回固定提取结果(不调真实 LLM)。"""
-    def call_llm(self, request):
+    async def call_llm(self, request):
         class R:
             text = "提取结果:Hello"
         return R()
@@ -625,7 +644,7 @@ def test_web_fetch_http_to_https(monkeypatch):
         captured["url"] = url
         return _FakeResp()
     monkeypatch.setattr(httpx, "get", fake_get)
-    _runtime_state.model_adapter = _MockAdapter()
+    _runtime_state.model_adapter.set(_MockAdapter())
     _tool("web_fetch").handler(url="http://example.com", prompt="总结")
     assert captured["url"].startswith("https://")
 
@@ -653,26 +672,26 @@ def test_web_fetch_extracts(monkeypatch):
         status_code = 200
         text = "<html><body><p>Hello world</p></body></html>"
     monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResp())
-    _runtime_state.model_adapter = _MockAdapter()
+    _runtime_state.model_adapter.set(_MockAdapter())
     r = _tool("web_fetch").handler(url="https://x.com", prompt="总结")
     assert "Hello" in r
 
 
 def test_web_fetch_invalid_url():
-    """无效 URL -> 返回 error(不抛)。"""
-    r = _tool("web_fetch").handler(url="ftp://x.com", prompt="x")
-    assert isinstance(r, dict) and "error" in r
+    """无效 URL -> raise ValueError(不重试),不再 return dict 被标 ok=True。"""
+    with pytest.raises(ValueError):
+        _tool("web_fetch").handler(url="ftp://x.com", prompt="x")
 
 
 def test_web_fetch_network_error(monkeypatch):
-    """mock 网络错误 -> 结构化 error,不崩。"""
+    """mock 网络错误 -> raise ConnectionError(可重试,进可靠性管道),不再 return dict 被标 ok=True。"""
     import httpx
 
     def boom(*a, **k):
         raise httpx.HTTPError("boom")
     monkeypatch.setattr(httpx, "get", boom)
-    r = _tool("web_fetch").handler(url="https://x.com", prompt="x")
-    assert isinstance(r, dict) and "error" in r
+    with pytest.raises(ConnectionError):
+        _tool("web_fetch").handler(url="https://x.com", prompt="x")
 
 
 # ============ TodoWrite 工具(步4,无状态 + nudge)============
@@ -750,3 +769,33 @@ def test_ask_user_schema_rejects_one_option():
         arguments={"questions": [{"question": "q", "header": "h", "options": [{"label": "only"}]}]}))
     assert not r.ok
     assert (r.error or {}).get("type") == "SchemaValidationError"
+
+
+# ============ P2 回归 ============
+
+def test_track_edit_uses_workspace_path(tmp_path):
+    """#2: _track_edit_callback 用 ws.resolve 解析路径(与 edit/write 一致),否则 workspace≠cwd 时
+    backup key(cwd-based)与实际改的文件(workspace-based)不一致,rewind 回滚到错文件。"""
+    from agent.agentloop import _track_edit_callback
+    from agent.core.workspace import Workspace
+    ws_root = tmp_path / "ws"; ws_root.mkdir()
+    fh = FileHistory(tmp_path / "fh")
+    _runtime_state.file_history.set(fh)
+    _runtime_state.workspace.set(Workspace(root=ws_root))
+    _runtime_state.current_step_id.set(0)
+    # 相对路径 "a.txt" -> ws.resolve -> ws_root/a.txt(不是 cwd/a.txt)
+    _track_edit_callback(ToolCall(call_id="c1", tool_name="edit",
+                                  arguments={"file_path": "a.txt"}))
+    key = str((ws_root / "a.txt").resolve())
+    assert key in fh.snapshots[-1].tracked   # backup key 是 workspace 路径,非 cwd
+
+
+def test_idempotency_get_returns_copy():
+    """#7: IdempotencyStore.get 返回 deepcopy,调用方改 data 不污染缓存(修复前返回浅引用)。"""
+    from agent.reliability.idempotency import IdempotencyStore
+    store = IdempotencyStore()
+    call = ToolCall(call_id="c1", tool_name="t", arguments={})
+    store.set(call, {"v": [1, 2, 3]})
+    got = store.get(call)
+    got["v"].append(999)                          # 改返回值
+    assert store.get(call)["v"] == [1, 2, 3]      # 缓存未被污染

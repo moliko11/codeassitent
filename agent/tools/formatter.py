@@ -53,5 +53,5 @@ class ToolResultFormatter:
             return text
         if self.strategy == "truncate":
             return text[:self.max_length] + f"...（已截断，共 {len(text)} 字符，如需更多请分页）"
-        # summarize / paginate 后续实现
-        return text[:self.max_length]
+        # summarize/paginate 不实现:对齐 CC 不截断,大结果交 ToolResultBudget 无损落盘(CLAUDE.md 约定)
+        return text
