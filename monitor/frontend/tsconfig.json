@@ -15,7 +15,7 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "noFallthroughCasesInSwitch": true,
-    "baseUrl": ".",
+    // TS5.0+ paths 相对 tsconfig 目录解析,不再需要 baseUrl(新版编译器标 deprecated 报红)
     "paths": { "@/*": ["./src/*"] }
   },
   "include": ["src"]
