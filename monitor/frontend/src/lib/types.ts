@@ -1,4 +1,4 @@
-// 后端 JSON 的 TS 类型(逐字对照实跑 curl 的返回,见 docs/monitor-frontend-design.md §0.2)
+// 后端 JSON 的 TS 类型(逐字对照实跑 curl 的返回,见 docs/monitoring/monitor-frontend-design.md §0.2)
 // 字段缺失一律兜底:消费方用 `?? 0 / ""`,类型上保留可选。
 
 export interface RunMeta {

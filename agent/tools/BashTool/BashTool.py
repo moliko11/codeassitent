@@ -4,7 +4,7 @@
 - 不做沙箱(留 TODO,对标 CC SandboxManager);只做超时。
 - 不接 trackEdit(命令改哪些文件拿不到,是工具体系边界;CC 也不靠 Bash 追踪编辑)。
 - git 命令的安全门禁不在本工具内,而在 before_tool Guardrail(GitSafetyGuard):
-  CC 对每条 git 命令做白名单 + 多层门禁(见 docs/cc-git-integration.md),
+  CC 对每条 git 命令做白名单 + 多层门禁(见 docs/cc-reference/cc-git-integration.md),
   非简单"靠 git"。本工具只负责执行,git 只读/写/硬拦判定见 guardrails/git_safety.py。
 - 失败命令(exit_code!=0)不抛异常,返回 exit_code 让 LLM 看 stderr 自行调整。
 - 超时抛 ToolTimeoutError(可重试,对标阶段4 _run_with_timeout)。

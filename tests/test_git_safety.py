@@ -1,6 +1,6 @@
 """P0 git 白名单门禁验收测试(guardrails/git_safety.py)。
 
-覆盖 docs/cc-git-integration.md「实现优先级」P0:
+覆盖 docs/cc-reference/cc-git-integration.md「实现优先级」P0:
 - 只读白名单(log/diff/show/blame/status)免确认放行
 - 其余 git 子命令(写命令)-> ask
 - config 注入 flag(-c/--exec-path/--config-env)-> 硬拦 block

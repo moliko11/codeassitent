@@ -2,7 +2,7 @@
 #
 # CC 的做法是白名单(allowlist)不是黑名单:只读子命令 + flag 校验通过 = 免确认放行;
 # 不在白名单的(所有写命令)= 非只读 = fall through 到 ask;只有能 RCE 的才硬拦。
-# 见 docs/cc-git-integration.md「工具内安全层」「实现优先级」两节。
+# 见 docs/cc-reference/cc-git-integration.md「工具内安全层」「实现优先级」两节。
 #
 # 本文件只做 P0+P1 最小可用(细节可简化,对标项目 impl-style):
 # 1. 只读白名单:git log/diff/show/blame/status 免确认。其余 git 子命令 -> ask。

@@ -1,6 +1,6 @@
 # 监控后台 React 前端
 
-ez-interview 监控后台的 React 19 仪表盘,只读后端 FastAPI API,对标 Langfuse 观测体验。设计稿见 [docs/monitor-frontend-design.md](../../../docs/monitor-frontend-design.md)。
+ez-interview 监控后台的 React 19 仪表盘,只读后端 FastAPI API,对标 Langfuse 观测体验。设计稿见 [docs/monitoring/monitor-frontend-design.md](../../../docs/monitoring/monitor-frontend-design.md)。
 
 ## 技术栈
 

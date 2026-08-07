@@ -5,7 +5,7 @@
 首轮 build 一次 + 防重复 spawn。
 
 全部 fail-open:非仓库 / git 未装 / 任何错误 -> 返回 None/False,不抛、不阻塞 prompt 组装。
-对标 docs/cc-git-integration.md P1「可直接 spawn git rev-parse/symbolic-ref 缓存」。
+对标 docs/cc-reference/cc-git-integration.md P1「可直接 spawn git rev-parse/symbolic-ref 缓存」。
 """
 import hashlib
 import subprocess
