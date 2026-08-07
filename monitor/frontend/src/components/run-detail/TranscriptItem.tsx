@@ -4,6 +4,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/cn";
 import type { TranscriptRecord } from "@/lib/types";
 import { User, Bot, Wrench, Flag } from "lucide-react";
 
@@ -22,7 +23,14 @@ function resultSummary(r: NonNullable<TranscriptRecord["result"]>): string {
   return typeof r.data === "string" ? r.data : JSON.stringify(r.data);
 }
 
-export function TranscriptItem({ record: r }: { record: TranscriptRecord }) {
+export function TranscriptItem({
+  record: r,
+  highlight,
+}: {
+  record: TranscriptRecord;
+  /** 火焰图「在消息流查看」跳转:匹配的 tool_result 高亮(Phase 3 §3.1) */
+  highlight?: boolean;
+}) {
   if (r.type === "user") {
     return (
       <div className="flex gap-2 rounded-md px-2 py-1.5 hover:bg-[var(--muted)]/40">
@@ -69,7 +77,13 @@ export function TranscriptItem({ record: r }: { record: TranscriptRecord }) {
     const summ = resultSummary(res);
     const long = summ.length > 100;
     return (
-      <Collapsible className="flex gap-2 rounded-md px-2 py-1 hover:bg-[var(--muted)]/40">
+      <Collapsible
+        data-call-id={res.call_id ?? undefined}
+        className={cn(
+          "flex gap-2 rounded-md px-2 py-1 hover:bg-[var(--muted)]/40",
+          highlight && "bg-[var(--muted)]/60 ring-2 ring-indigo-400",
+        )}
+      >
         <Wrench className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
         <div className="min-w-0 flex-1 text-sm">
           <SubagentBadge agentId={r.agent_id} />

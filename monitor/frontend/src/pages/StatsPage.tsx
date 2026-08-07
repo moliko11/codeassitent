@@ -13,9 +13,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/common/EmptyState";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { KpiCard } from "@/components/common/KpiCard";
+import { RefreshButton } from "@/components/common/RefreshButton";
 import { fmtToken, fmtPct } from "@/lib/format";
 import { ApiError } from "@/lib/api";
-import { Coins, Database, CheckCircle2, Hash } from "lucide-react";
+import { Link } from "react-router-dom";
+import { Coins, Database, CheckCircle2, Hash, ArrowRight } from "lucide-react";
 
 function ErrorOrEmpty({ q }: { q: { isError: boolean; error: unknown } }) {
   if (q.isError) return <EmptyState title="加载失败" desc={(q.error as ApiError).message} />;
@@ -37,9 +39,18 @@ export function StatsPage() {
 
   return (
     <div className="mx-auto max-w-7xl space-y-6 p-6">
-      <div>
-        <h1 className="text-xl font-semibold tracking-tight">统计</h1>
-        <p className="text-sm text-[var(--muted-foreground)]">跨 run 维度分析</p>
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight">统计</h1>
+          <p className="text-sm text-[var(--muted-foreground)]">跨 run 维度分析 · 每 15s 自动刷新</p>
+        </div>
+        <RefreshButton
+          onClick={() => {
+            statsQ.refetch();
+            runsQ.refetch();
+          }}
+          busy={statsQ.isFetching || runsQ.isFetching}
+        />
       </div>
 
       {statsQ.data && (
@@ -159,16 +170,19 @@ export function StatsPage() {
           </CardContent>
         </Card>
 
-        {/* 工具分析(预留) */}
+        {/* 工具分析(Phase 3 §3.5:独立 ToolsPage) */}
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm">工具分析</CardTitle>
           </CardHeader>
           <CardContent>
-            <EmptyState
-              title="待 /api/stats/tools"
-              desc="工具成功率 / latency P50/P95 / 重试率需后端逐 run load trace 聚合(monitor-dashboard-plan §4 TODO)。单 run 可看详情页 report(avg_latency / timeout / retry)。"
-            />
+            <Link
+              to="/tools"
+              className="inline-flex items-center gap-1.5 text-sm text-[var(--primary)] hover:underline"
+            >
+              打开工具使用统计页(成功率 / 平均耗时 / 重试 / 超时 / 错误分类)
+              <ArrowRight className="h-3.5 w-3.5" />
+            </Link>
           </CardContent>
         </Card>
       </div>

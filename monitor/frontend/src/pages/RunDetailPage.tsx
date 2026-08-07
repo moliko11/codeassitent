@@ -1,6 +1,7 @@
+import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
-import { useRun, useTrace, useTranscript } from "@/hooks/useQueries";
+import { useRun, useTrace, useTranscript, useSubagents } from "@/hooks/useQueries";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -8,6 +9,7 @@ import { EmptyState } from "@/components/common/EmptyState";
 import { MetaPanel } from "@/components/run-detail/MetaPanel";
 import { FlameGraph } from "@/components/run-detail/FlameGraph";
 import { TranscriptStream } from "@/components/run-detail/TranscriptStream";
+import { SubagentActivityList } from "@/components/run-detail/SubagentActivityList";
 import { SystemPromptView } from "@/components/run-detail/SystemPromptView";
 import { TokenBreakdown } from "@/components/run-detail/TokenBreakdown";
 import { ContextSnapshotView } from "@/components/run-detail/ContextSnapshotView";
@@ -18,6 +20,11 @@ export function RunDetailPage() {
   const runQ = useRun(runId ?? "");
   const traceQ = useTrace(runId ?? "");
   const transcriptQ = useTranscript(runId ?? "");
+  const subagentsQ = useSubagents(runId ?? "");
+
+  // 受控 tab + 火焰图跳转高亮(Phase 3 §3.1):「在消息流查看」-> 切 tab + 记 call_id
+  const [tab, setTab] = useState("flame");
+  const [highlightCallId, setHighlightCallId] = useState<string | null>(null);
 
   if (runQ.isLoading)
     return (
@@ -50,9 +57,10 @@ export function RunDetailPage() {
 
       <MetaPanel meta={meta} report={report} trace={traceQ.data} />
 
-      <Tabs defaultValue="flame" className="w-full">
+      <Tabs value={tab} onValueChange={setTab} className="w-full">
         <TabsList>
           <TabsTrigger value="flame">火焰图</TabsTrigger>
+          <TabsTrigger value="subagents">子 Agent</TabsTrigger>
           <TabsTrigger value="transcript">消息流</TabsTrigger>
           <TabsTrigger value="prompt">系统提示词</TabsTrigger>
           <TabsTrigger value="token">Token 明细</TabsTrigger>
@@ -65,7 +73,27 @@ export function RunDetailPage() {
               {traceQ.isLoading ? (
                 <Skeleton className="h-48" />
               ) : (
-                <FlameGraph trace={traceQ.data} />
+                <FlameGraph
+                  trace={traceQ.data}
+                  onJumpToTranscript={(callId) => {
+                    setHighlightCallId(callId);
+                    setTab("transcript");
+                  }}
+                />
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="subagents">
+          <Card>
+            <CardContent className="p-4">
+              {subagentsQ.isLoading ? (
+                <Skeleton className="h-48" />
+              ) : subagentsQ.isError ? (
+                <EmptyState title="加载失败" desc={(subagentsQ.error as ApiError).message} />
+              ) : (
+                <SubagentActivityList activities={subagentsQ.data ?? []} />
               )}
             </CardContent>
           </Card>
@@ -79,7 +107,10 @@ export function RunDetailPage() {
               ) : transcriptQ.isError ? (
                 <EmptyState title="加载失败" desc={(transcriptQ.error as ApiError).message} />
               ) : (
-                <TranscriptStream records={transcriptQ.data ?? []} />
+                <TranscriptStream
+                  records={transcriptQ.data ?? []}
+                  highlightCallId={highlightCallId}
+                />
               )}
             </CardContent>
           </Card>

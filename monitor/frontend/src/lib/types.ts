@@ -131,6 +131,38 @@ export interface SystemPrompt {
   intro: string;
   sections: PromptSection[];
   raw: string;
+  source?: "override" | "default";  // Phase 3 §3.3:persist/system_prompt.md 覆写 vs 默认静态版
+}
+
+// Phase 3 §3.5:/api/stats/tools 返回的单个工具聚合
+export interface ToolStat {
+  tool: string;
+  call_count: number;
+  success_count: number;
+  success_rate: number;
+  total_elapsed_ms: number;
+  avg_elapsed_ms: number;
+  attempts_total: number;
+  avg_attempts: number;
+  retry_count: number;
+  timeout_count: number;
+  error_types: Record<string, number>;
+}
+
+// Phase 3 §3.2:/api/runs/{id}/subagents 返回的子 agent 活动
+export interface SubagentToolCall { tool_name: string; ok: boolean; }
+export interface SubagentActivity {
+  id: number;
+  start_ts: number;
+  end_ts: number;
+  duration_ms: number;
+  step_count: number;
+  tool_count: number;
+  tool_success_count: number;
+  tool_success_rate: number;
+  token_total: number;
+  output: string | null;
+  tool_calls: SubagentToolCall[];
 }
 
 export type Feedback = Record<string, unknown>;

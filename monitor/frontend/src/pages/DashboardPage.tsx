@@ -2,6 +2,7 @@ import { Link } from "react-router-dom";
 import { Coins, ArrowDownToLine, ArrowUpFromLine, Database, Hash, CheckCircle2 } from "lucide-react";
 import { useStats, useRuns } from "@/hooks/useQueries";
 import { KpiCard } from "@/components/common/KpiCard";
+import { RefreshButton } from "@/components/common/RefreshButton";
 import { TokenTrendChart } from "@/components/common/charts/TokenTrendChart";
 import { ModelDistChart } from "@/components/common/charts/ModelDistChart";
 import { RateTrendChart } from "@/components/common/charts/RateTrendChart";
@@ -22,11 +23,20 @@ export function DashboardPage() {
 
   return (
     <div className="mx-auto max-w-7xl space-y-6 p-6">
-      <div>
-        <h1 className="text-xl font-semibold tracking-tight">Dashboard</h1>
-        <p className="text-sm text-[var(--muted-foreground)]">
-          跨会话聚合 · token / 缓存 / 工具成功率
-        </p>
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight">Dashboard</h1>
+          <p className="text-sm text-[var(--muted-foreground)]">
+            跨会话聚合 · token / 缓存 / 工具成功率(每 15s 自动刷新)
+          </p>
+        </div>
+        <RefreshButton
+          onClick={() => {
+            statsQ.refetch();
+            runsQ.refetch();
+          }}
+          busy={statsQ.isFetching || runsQ.isFetching}
+        />
       </div>
 
       {/* KPI 卡片 */}

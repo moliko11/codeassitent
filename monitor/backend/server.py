@@ -10,6 +10,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
+from pydantic import BaseModel
 
 from agent.persist import paths as ppaths          # 动态读 PERSIST_ROOT(测试 monkeypatch 生效)
 from agent.persist import list_runs, read_run_report, read_transcript
@@ -44,6 +45,37 @@ def _split_sections(text: str) -> dict:
         "intro": "\n".join(intro).strip(),
         "sections": [{"title": s["title"], "body": "\n".join(s["body"]).strip()} for s in sections],
     }
+
+
+def _system_prompt_override_path() -> Path:
+    """会话级系统提示词覆写文件(persist 同级 system_prompt.md)。存在则优先于默认静态版。
+    Phase 3 §3.3:管理页编辑保存到这里,GET 读它。删掉 = 恢复默认。"""
+    return ppaths.PERSIST_ROOT.parent / "system_prompt.md"
+
+
+def _read_system_prompt() -> str:
+    """当前生效的系统提示词:有覆写文件读覆写,否则 AgentConfig 默认。"""
+    p = _system_prompt_override_path()
+    if p.exists():
+        try:
+            txt = p.read_text(encoding="utf-8")
+            if txt.strip():
+                return txt
+        except OSError:
+            pass
+    return AgentConfig().system_prompt
+
+
+def _system_prompt_source() -> str:
+    """当前生效来源:"override"(persist/system_prompt.md 非空)或 "default"。"""
+    p = _system_prompt_override_path()
+    if p.exists():
+        try:
+            if p.read_text(encoding="utf-8").strip():
+                return "override"
+        except OSError:
+            pass
+    return "default"
 
 
 def _read_run_meta(run_id: str) -> dict | None:
@@ -114,20 +146,169 @@ def api_run_transcript(run_id: str, limit: int = Query(100000, ge=1, le=100000))
     return recs[-limit:]
 
 
+@app.get("/api/runs/{run_id}/subagents")
+def api_run_subagents(run_id: str):
+    """Phase 3 §3.2:子 agent 活动列表(transcript 里 agent_id="subagent" 的记录聚合)。
+    无子 agent 活动返回空列表(不 404,UI 显示空态)。"""
+    if not (ppaths.PERSIST_ROOT / run_id).is_dir():
+        raise HTTPException(404, "run not found")
+    return aggregate_subagents(run_id)
+
+
+@app.get("/api/stats/tools")
+def api_stats_tools():
+    """Phase 3 §3.5:工具使用统计(逐 run load trace 聚合 tool span)。"""
+    return aggregate_tools()
+
+
 @app.get("/api/feedback")
 def api_feedback():
     """反馈按 variant 聚合(👍率)。"""
     return FeedbackStore().aggregate()
 
 
+class SystemPromptBody(BaseModel):
+    raw: str
+
+
 @app.get("/api/system_prompt")
 def api_system_prompt():
-    """首轮加载的系统提示词,按 ## 标题分层(intro + sections + raw)。
-    源:AgentConfig().system_prompt(REPL 用默认配置,main 不覆盖即 DEFAULT_SYSTEM_PROMPT)。"""
-    prompt = AgentConfig().system_prompt
+    """当前生效的系统提示词,按 ## 标题分层(intro + sections + raw + source)。
+    Phase 3 §3.3:有覆写文件读覆写(会话级覆盖),否则 AgentConfig 默认(静态 DEFAULT_SYSTEM_PROMPT)。
+    source="override"|"default" 供前端标来源徽标。"""
+    prompt = _read_system_prompt()
     d = _split_sections(prompt)
     d["raw"] = prompt
+    d["source"] = _system_prompt_source()
     return d
+
+
+@app.post("/api/system_prompt")
+def api_system_prompt_save(body: SystemPromptBody):
+    """Phase 3 §3.3:保存系统提示词覆写(写 persist/system_prompt.md)。下次 GET/加载生效。"""
+    p = _system_prompt_override_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(body.raw or "", encoding="utf-8")
+    return {"ok": True, "saved_to": str(p), "chars": len(body.raw or "")}
+
+
+@app.delete("/api/system_prompt")
+def api_system_prompt_reset():
+    """Phase 3 §3.3:删除覆写文件,恢复默认提示词。"""
+    p = _system_prompt_override_path()
+    existed = p.exists()
+    if existed:
+        try:
+            p.unlink()
+        except OSError:
+            raise HTTPException(500, "删除覆写文件失败")
+    return {"ok": True, "reset": existed}
+
+
+# ── Phase 3 §3.2:子 agent 活动聚合(transcript 里 agent_id="subagent" 的记录按连续段分组)──
+
+def aggregate_subagents(run_id: str) -> list[dict]:
+    """子 agent 活动列表:主 agent 用 Task 工具派子 agent 时,子 agent 的事件带
+    agent_id="subagent" 落主 transcript。按「连续段」分组(主 agent 的非 subagent 记录作分隔),
+    每段聚合成一条活动:步骤数/工具/成功率/token/最终输出。"""
+    recs = list(read_transcript(run_id))
+    groups: list[dict] = []
+    cur: dict | None = None
+    for rec in recs:
+        if rec.get("agent_id") == "subagent":
+            if cur is None:
+                cur = {"start_ts": rec.get("ts", 0), "records": []}
+            cur["records"].append(rec)
+            cur["end_ts"] = rec.get("ts", 0)
+        else:
+            if cur is not None:
+                groups.append(cur)
+                cur = None
+    if cur is not None:
+        groups.append(cur)
+
+    out: list[dict] = []
+    for i, g in enumerate(groups):
+        tool_calls: list[dict] = []
+        ok = tokens = step_count = 0
+        output = ""
+        for rec in g["records"]:
+            t = rec.get("type")
+            if t == "assistant":
+                step_count += 1
+                u = rec.get("usage") or {}
+                tokens += (u.get("total_tokens", 0) or 0)
+                if rec.get("text"):
+                    output = rec["text"]                       # 最后一段 assistant 文本 = 最终输出
+            elif t == "tool_result":
+                res = rec.get("result") or {}
+                tool_calls.append({"tool_name": res.get("tool_name"),
+                                   "ok": bool(res.get("ok"))})
+                if res.get("ok"):
+                    ok += 1
+        out.append({
+            "id": i,
+            "start_ts": g["start_ts"],
+            "end_ts": g["end_ts"],
+            "duration_ms": (g["end_ts"] - g["start_ts"]) * 1000,   # perf_counter 差(相对,非墙钟)
+            "step_count": step_count,
+            "tool_count": len(tool_calls),
+            "tool_success_count": ok,
+            "tool_success_rate": (ok / len(tool_calls)) if tool_calls else 0.0,
+            "token_total": tokens,
+            "output": output or None,
+            "tool_calls": tool_calls,
+        })
+    return out
+
+
+# ── Phase 3 §3.5:工具使用统计(逐 run load trace,聚合 tool span)──
+
+def aggregate_tools() -> list[dict]:
+    """按工具名聚合调用:次数/成功率/平均耗时/平均 attempts/重试/超时/错误分类。
+    列表页不做(慢,aggregate.py 注释),这是独立 M2 端点,逐 run load trace 可接受。"""
+    from agent.tracing.store import TraceStore
+    agg: dict[str, dict] = {}
+    for run in list_runs():
+        run_id = run["run_id"]
+        tp = ppaths.PERSIST_ROOT / run_id / "trace.jsonl"
+        if not tp.exists():                       # 崩了没 RunEnd,坑2
+            continue
+        try:
+            trace = TraceStore(run_id, path=str(tp)).load()
+        except Exception:
+            continue
+        for span in trace.spans:
+            if span.type != "tool":
+                continue
+            name = span.name or "unknown"
+            a = agg.setdefault(name, {
+                "tool": name, "call_count": 0, "success_count": 0,
+                "total_elapsed_ms": 0.0, "attempts_total": 0,
+                "timeout_count": 0, "error_types": {},
+            })
+            a["call_count"] += 1
+            if span.attrs.get("ok"):
+                a["success_count"] += 1
+            d = span.duration_ms()
+            if d is not None:
+                a["total_elapsed_ms"] += d
+            a["attempts_total"] += (span.attrs.get("attempts", 1) or 1)
+            et = span.attrs.get("error_type")
+            if et:
+                a["error_types"][et] = a["error_types"].get(et, 0) + 1
+                if "Timeout" in str(et):
+                    a["timeout_count"] += 1
+    out = []
+    for a in agg.values():
+        n = a["call_count"]
+        a["success_rate"] = (a["success_count"] / n) if n else 0.0
+        a["avg_elapsed_ms"] = (a["total_elapsed_ms"] / n) if n else 0.0
+        a["avg_attempts"] = (a["attempts_total"] / n) if n else 0.0
+        a["retry_count"] = a["attempts_total"] - n      # attempts>1 多出的执行次数
+        out.append(a)
+    out.sort(key=lambda a: a["call_count"], reverse=True)
+    return out
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 import { NavLink, Outlet } from "react-router-dom";
-import { LayoutDashboard, ListOrdered, BarChart3, FileText, Activity } from "lucide-react";
+import { LayoutDashboard, ListOrdered, BarChart3, Wrench, FileText, Activity } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { ThemeToggle } from "./ThemeToggle";
 
@@ -7,6 +7,7 @@ const NAV = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
   { to: "/runs", label: "Runs", icon: ListOrdered, end: false },
   { to: "/stats", label: "统计", icon: BarChart3, end: false },
+  { to: "/tools", label: "工具统计", icon: Wrench, end: false },
   { to: "/prompt", label: "系统提示词", icon: FileText, end: false },
 ];
 

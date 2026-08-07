@@ -23,6 +23,7 @@ Thumbs.db
 
 # 临时笔记 / 架构图草稿（不进版本库）
 agent/供应商.txt
+docs/
 
 # Agent 运行时持久化产物（transcript 等，不进版本库）
 persist/runs/

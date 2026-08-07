@@ -171,3 +171,134 @@ def test_api_system_prompt():
     assert d["raw"] and "## " in d["raw"]               # 原文含 ## 标记
     # 段体非空
     assert all(s["body"] for s in d["sections"])
+
+
+# ─────────────────── Phase 3(监控深化):子 Agent / 工具统计 / 提示词管理 ───────────────────
+
+def _seed_tools(run_id, tools):
+    """往 run 的 trace.jsonl 追加 tool spans(Phase 3 §3.5 聚合输入)。
+    工具 span attrs 对齐 tracer:ok/attempts/error_type。"""
+    rdir = paths.PERSIST_ROOT / run_id
+    rdir.mkdir(parents=True, exist_ok=True)
+    with open(rdir / "trace.jsonl", "a", encoding="utf-8") as f:
+        for i, t in enumerate(tools):
+            elapsed = t.get("elapsed_ms", 100.0)
+            span = {
+                "span_id": f"t{i}", "parent_id": "s0", "type": "tool",
+                "name": t["name"], "start": 0.1, "end": 0.1 + elapsed / 1000.0,
+                "attrs": {"ok": t.get("ok", True), "attempts": t.get("attempts", 1)},
+            }
+            if t.get("error_type"):
+                span["attrs"]["error_type"] = t["error_type"]
+            f.write(json.dumps(span, ensure_ascii=False) + "\n")
+
+
+def test_api_stats_tools():
+    """GET /api/stats/tools -> 按工具名聚合调用/成功率/重试/超时/错误分类,倒序。"""
+    _seed_run("r-1")
+    _seed_tools("r-1", [
+        {"name": "read", "ok": True},
+        {"name": "read", "ok": False, "error_type": "ToolExecutionError", "attempts": 2},
+        {"name": "bash", "ok": False, "error_type": "TimeoutError", "attempts": 3,
+         "elapsed_ms": 200.0},
+    ])
+    _seed_run("r-2")
+    _seed_tools("r-2", [
+        {"name": "read", "ok": True, "elapsed_ms": 300.0},
+    ])
+    tools = client.get("/api/stats/tools").json()
+    by_name = {t["tool"]: t for t in tools}
+    assert by_name["read"]["call_count"] == 3
+    assert by_name["read"]["success_count"] == 2
+    assert by_name["read"]["success_rate"] == pytest.approx(2 / 3)
+    assert by_name["read"]["retry_count"] == 1          # attempts 1+2+1 - 3
+    assert by_name["read"]["avg_attempts"] == pytest.approx(4 / 3)
+    assert by_name["read"]["error_types"] == {"ToolExecutionError": 1}
+    assert by_name["read"]["avg_elapsed_ms"] == pytest.approx((100 + 100 + 300) / 3)
+    assert by_name["bash"]["timeout_count"] == 1
+    assert by_name["bash"]["retry_count"] == 2          # attempts 3 - 1
+    assert tools[0]["tool"] == "read"                   # 按 call_count 倒序
+
+
+def _seed_subagent(run_id):
+    """主 agent + 两段子 agent 活动(中间主 agent 记录分隔),聚合应产出 2 条。
+    子 agent 记录用 Persister(agent_id="subagent") 落主 transcript。"""
+    from agent.persist import Persister
+    from agent.core.models import ModelResponse, TokenUsage
+    from agent.tools.defs import ToolCall, ToolResult
+
+    main = Persister(run_id)
+    main.log_user("请并行分析")
+
+    sub1 = Persister(run_id, agent_id="subagent")      # 活动1:读工具成功
+    sub1.log_assistant(ModelResponse(
+        text="子任务1思考",
+        tool_calls=[ToolCall(call_id="c1", tool_name="read", arguments={})],
+        usage=TokenUsage(input_tokens=10, output_tokens=20, total_tokens=30)))
+    sub1.log_tool_result(ToolResult(call_id="c1", tool_name="read", ok=True, text="内容"))
+    sub1.log_assistant(ModelResponse(
+        text="子任务1结论",
+        usage=TokenUsage(input_tokens=5, output_tokens=5, total_tokens=10)))
+
+    main.log_assistant(ModelResponse(text="我在处理"))  # 主 agent 分隔
+
+    sub2 = Persister(run_id, agent_id="subagent")      # 活动2:bash 失败
+    sub2.log_assistant(ModelResponse(
+        text="子任务2",
+        tool_calls=[ToolCall(call_id="c2", tool_name="bash", arguments={})],
+        usage=TokenUsage(input_tokens=7, output_tokens=3, total_tokens=10)))
+    sub2.log_tool_result(ToolResult(call_id="c2", tool_name="bash", ok=False, text="err"))
+
+    main.close(); sub1.close(); sub2.close()
+
+
+def test_api_run_subagents():
+    """GET /api/runs/{id}/subagents -> 连续段分组 + 每段聚合(step/tool/token/output)。"""
+    _seed_subagent("r-sub")
+    acts = client.get("/api/runs/r-sub/subagents").json()
+    assert len(acts) == 2                               # 中间主 agent 记录分隔成两段
+    a0, a1 = acts
+    assert a0["step_count"] == 2                        # 2 段 assistant
+    assert a0["tool_count"] == 1 and a0["tool_success_count"] == 1
+    assert a0["tool_success_rate"] == 1.0
+    assert a0["token_total"] == 40                      # 30 + 10
+    assert a0["output"] == "子任务1结论"                 # 最后一段 assistant 文本
+    assert a0["tool_calls"] == [{"tool_name": "read", "ok": True}]
+    assert a1["tool_success_count"] == 0 and a1["tool_success_rate"] == 0.0
+    assert a1["tool_calls"] == [{"tool_name": "bash", "ok": False}]
+    assert a1["output"] == "子任务2"
+
+
+def test_api_run_subagents_empty():
+    """无子 agent 活动 -> 空列表(不 404,UI 显示空态)。"""
+    _seed_run("r-plain")
+    assert client.get("/api/runs/r-plain/subagents").json() == []
+
+
+def test_api_run_subagents_404():
+    """run 目录不存在 -> 404。"""
+    assert client.get("/api/runs/nope/subagents").status_code == 404
+
+
+def test_api_system_prompt_source_default():
+    """无覆写文件 -> source=default(前端据此不标「覆写中」)。"""
+    d = client.get("/api/system_prompt").json()
+    assert d["source"] == "default"
+
+
+def test_api_system_prompt_save_and_reset():
+    """POST 保存覆写 -> GET source=override + raw/sections 生效;DELETE -> 回 default。"""
+    raw = "## 我的覆写\n自定义内容"
+    r = client.post("/api/system_prompt", json={"raw": raw})
+    assert r.status_code == 200 and r.json()["ok"] is True
+    d = client.get("/api/system_prompt").json()
+    assert d["source"] == "override"
+    assert d["raw"] == raw
+    assert d["intro"] == ""
+    assert d["sections"] == [{"title": "我的覆写", "body": "自定义内容"}]
+
+    rr = client.delete("/api/system_prompt")
+    assert rr.status_code == 200 and rr.json()["reset"] is True
+    d2 = client.get("/api/system_prompt").json()
+    assert d2["source"] == "default"
+    assert d2["raw"] != raw
