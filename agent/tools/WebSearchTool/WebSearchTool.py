@@ -10,6 +10,7 @@ import os
 import httpx
 
 from ..registry import tool
+from ..settings import t
 
 WEB_SEARCH_SCHEMA = {
     "type": "object",
@@ -31,11 +32,12 @@ WEB_SEARCH_SCHEMA = {
     input_schema=WEB_SEARCH_SCHEMA,
     mutates_external=False,
 )
-def web_search(query, allowed_domains=None, blocked_domains=None, max_results=5):
+def web_search(query, allowed_domains=None, blocked_domains=None, max_results=None):
     if not query or not str(query).strip():
         raise ValueError("query 不能为空")
     if allowed_domains and blocked_domains:
         raise ValueError("不能同时传 allowed_domains 和 blocked_domains")
+    max_results = max_results if max_results is not None else t("web_search.default_max_results", 5)  # tools.yaml,缺省 5
     api_key = os.environ.get("TAVILY_API_KEY") or os.environ.get("TAVIL_API_KEY")
     if not api_key:
         raise ValueError("未设置 TAVILY_API_KEY/TAVIL_API_KEY 环境变量")
@@ -49,16 +51,16 @@ def web_search(query, allowed_domains=None, blocked_domains=None, max_results=5)
                 "include_domains": allowed_domains or [],
                 "exclude_domains": blocked_domains or [],
             },
-            timeout=15,
+            timeout=t("web_search.timeout", 15),  # tools.yaml,缺省 15
         )
         resp.raise_for_status()
     except httpx.HTTPError as e:
         raise ConnectionError(f"网络错误: {e}") from e
     data = resp.json()
     results = data.get("results", [])
-    # 格式化:每条 标题+url+摘要(截 300);末尾 Sources markdown 链接(对标 CC 强制)
+    # 格式化:每条 标题+url+摘要(截 content_truncate_chars);末尾 Sources markdown 链接(对标 CC 强制)
     blocks = [
-        f"### {r.get('title', '')}\n{r.get('url', '')}\n{(r.get('content') or '')[:300]}"
+        f"### {r.get('title', '')}\n{r.get('url', '')}\n{(r.get('content') or '')[:t('web_search.content_truncate_chars', 300)]}"
         for r in results
     ]
     body = "\n\n".join(blocks) if blocks else "无结果"

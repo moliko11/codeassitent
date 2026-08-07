@@ -31,28 +31,28 @@ class ProviderConfig:
 _ENV_PREFIX = {"openai_compatible": "DEEPSEEK", "ark": "VOLCANO_ENGINE"}
 
 
-def load_provider_config(provider: str) -> ProviderConfig:
-    """从环境变量加载指定 provider 的配置"""
-    prefix = _ENV_PREFIX.get(provider)
+def load_provider_config(provider: str | None = None) -> ProviderConfig:
+    """加载指定 provider 的配置（provider 缺省走 YAML default/AGENT_PROVIDER env）。
+
+    参数来源（优先级 YAML > env 回落）：
+    - api_key 只从 api_key_env 指定的环境变量读(code/.env)，绝不放 YAML。
+    - base_url/model 从 provider.yaml 读；为空则回落读 env ${prefix}_BASE_URL / _MODEL（保持 .env 可用）。
+    """
+    from .loader import get_section, default_provider
+    prov = provider or default_provider()
+    entry = (get_section("provider").get("providers") or {}).get(prov) or {}
+    prefix = entry.get("env_prefix") or _ENV_PREFIX.get(prov)
     if prefix is None:
-        raise ValueError(f"unknown provider: {provider}，可选: {list(_ENV_PREFIX)}")
+        raise ValueError(f"unknown provider: {prov}，可选: {list(_ENV_PREFIX)}")
+    api_key_env = entry.get("api_key_env") or f"{prefix}_API_KEY"
+    base_url = entry.get("base_url") or os.environ.get(f"{prefix}_BASE_URL", "")
+    model = entry.get("model") or os.environ.get(f"{prefix}_MODEL", "")
     return ProviderConfig(
-        provider=provider,
-        api_key=os.environ.get(f"{prefix}_API_KEY", "").strip(),
-        base_url=os.environ.get(f"{prefix}_BASE_URL", "").strip(),
-        model=os.environ.get(f"{prefix}_MODEL", "").strip(),
+        provider=prov,
+        api_key=os.environ.get(api_key_env, "").strip(),
+        base_url=str(base_url).strip(),
+        model=str(model).strip(),
     )
-# def load_provider_config(provider: str) -> ProviderConfig:
-#     """从环境变量加载指定 provider 的配置"""
-#     prefix = _ENV_PREFIX.get(provider)
-#     if prefix is None:
-#         raise ValueError(f"unknown provider: {provider}，可选: {list(_ENV_PREFIX)}")
-#     return ProviderConfig(
-#         provider="ark",
-#         api_key="ark-b7c08d49-6ed7-4f48-860e-6ac08f724c0c-c944b",
-#         base_url="https://ark.cn-beijing.volces.com/api/coding/v3",
-#         model="Doubao-Seed-2.0-lite",
-#     )
 
 
 def make_adapter(pc: ProviderConfig):

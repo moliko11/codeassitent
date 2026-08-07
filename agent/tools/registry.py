@@ -18,13 +18,15 @@ from .defs import Tool, ToolCall, ToolResult, ToolSpec
 from ..streaming.events import ToolStart, ToolEnd
 
 
-def _result_summary(result: ToolResult) -> str | None:
-    """ToolEnd 摘要：成功取格式化后的 text（截断），失败取 error.message。"""
+def _result_summary(result: ToolResult, limit: int = 80) -> str | None:
+    """ToolEnd 摘要：成功取格式化后的 text（按 limit 截断），失败取 error.message。
+
+    limit 由 ToolExecutor.result_summary_chars 传入(reliability.yaml execution.result_summary_chars)。"""
     if result.ok:
         t = result.text
         if not t:
             return None
-        return t if len(t) <= 80 else t[:80] + "…"
+        return t if len(t) <= limit else t[:limit] + "…"
     return (result.error or {}).get("message")
 
 
@@ -80,7 +82,8 @@ class ToolExecutor:
                  retry_policy: RetryPolicy = None, retry_mode="llm_retry",
                  breaker_config=BreakerConfig(), idempotency_store: IdempotencyStore = None,
                  audit_logger: AuditLogger = None,
-                 before_mutation=None, guardrail_runner=None, config=None):
+                 before_mutation=None, guardrail_runner=None, config=None,
+                 parallelism=8, max_workers=1, result_summary_chars=80):
         """工具执行器。
 
         可靠性参数（均可选，不传则该机制不生效）：
@@ -89,6 +92,11 @@ class ToolExecutor:
         - breaker_config: 熔断器配置，per-tool 保护下游。
         - idempotency_store: 幂等去重缓存，按 key 缓存成功结果。
         - audit_logger: 审计日志，记录 who/what/when/result。
+
+        执行参数(reliability.yaml execution 段)：
+        - parallelism: _parallel 并发工具调用的 Semaphore 上限。
+        - max_workers: _run_with_timeout 的 ThreadPoolExecutor worker 数。
+        - result_summary_chars: ToolEnd 摘要的截断字符数。
         """
         self.registry = registry
         self.formatter = formatter or ToolResultFormatter()
@@ -101,6 +109,9 @@ class ToolExecutor:
         self.before_mutation = before_mutation   # 留点：将来 FileEditTool 在这 track_edit(备份编辑前内容)
         self.guardrail_runner = guardrail_runner  # 阶段8:before_tool/after_tool 护栏(None=不校验)
         self.config = config  # 阶段8:Guardrail.check 读 config.allowed_tools
+        self.parallelism = parallelism
+        self.max_workers = max_workers
+        self.result_summary_chars = result_summary_chars
 
     def _get_breaker(self, tool_name) -> CircuitBreaker:
         return self._breakers.setdefault(tool_name, CircuitBreaker(self.breaker_config))
@@ -237,7 +248,7 @@ class ToolExecutor:
         # current_step_id(即使 agentloop/continue_loop 已 .set())-> WebFetch 坏、edit/write 跳权限校验、
         # track_edit 拿不到 step_id。copy_context().run 让 handler 在调用方上下文里跑。
         ctx = contextvars.copy_context()
-        pool = ThreadPoolExecutor(max_workers=1)
+        pool = ThreadPoolExecutor(max_workers=self.max_workers)
         fut = pool.submit(lambda: ctx.run(handler, **args))
         try:
             return fut.result(timeout=timeout)
@@ -321,7 +332,7 @@ class ToolExecutor:
             for c in calls:
                 sink.emit(ToolStart(
                     call_id=c.call_id, tool_name=c.tool_name, arguments=c.arguments))
-        sem = asyncio.Semaphore(8)
+        sem = asyncio.Semaphore(self.parallelism)   # 并发上限(reliability.yaml execution.parallel_semaphore)
 
         async def run_one(c):
             async with sem:
@@ -336,7 +347,7 @@ class ToolExecutor:
                     sink.emit(ToolEnd(
                         call_id=r.call_id, tool_name=r.tool_name, ok=r.ok,
                         error_type=(r.error or {}).get("type") if r.error else None,
-                        summary=_result_summary(r),
+                        summary=_result_summary(r, limit=self.result_summary_chars),
                         attempts=(r.meta or {}).get("attempts", 1)))
                 yield r
         except asyncio.CancelledError:

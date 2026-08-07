@@ -1,0 +1,6 @@
+builder:                      # ContextBuilder(builder.py) 参数
+  context_budget: null        # 单次请求输入侧 token 预算(null=不限;与 agent.yaml 同义,装配时取其一)
+  tool_result_threshold: 2000 # 超此字符的工具结果落盘(= budget.py PERSIST_THRESHOLD_CHARS 生效值)
+  keep_recent: 3              # micro_compact 保留最近 K 个工具结果原文
+  keep_recent_turns: 4        # auto_compact 保留尾部 N 条消息
+  memory_recall_top_k: 3      # builder._inject_memory 的 recall top_k(现硬编码 3)

@@ -25,7 +25,10 @@ from pydantic import BaseModel
 # ---- code/agent 复用(import 一次,模块级共享)----
 from agent import tools as _tools
 from agent.config.provider import load_provider_config, make_adapter
-from agent.config.config import AgentConfig
+from agent.config.loader import (
+    build_agent_config, build_guardrail_runner, build_memory_params,
+    build_tool_executor_params, get_section,
+)
 from agent.core.state import AgentState, _ser
 from agent.core.workspace import Workspace
 from agent.runtime import RuntimeContext
@@ -34,12 +37,7 @@ from agent.streaming.sse_sink import SSESink
 from agent.streaming.events import RunStart, RunEnd, StreamEvent
 from agent.tracing import Tracer, TraceStore
 from agent.tracing.metrics import MetricsCollector
-from agent.guardrails import (GuardrailRunner, PromptInjectionGuard, PermissionGuard,
-    HighRiskGuard, GitSafetyGuard, PIIGuard, IndirectInjectionGuard, ToolResultPIIGuard)
-from agent.reliability.retry import RetryPolicy
-from agent.reliability.idempotency import IdempotencyStore
-from agent.reliability.audit import AuditLogger
-from agent.persist.paths import memory_dir, audit_path, PERSIST_ROOT
+from agent.persist.paths import memory_dir, PERSIST_ROOT
 from agent.persist.store import list_runs, read_run_report, read_transcript
 from agent.persist.persister import Persister
 from agent.memory import MemoryStore
@@ -56,37 +54,30 @@ from .session_manager import SessionManager, SessionState
 
 # ─────────────────── 装配(模块级共享件,对齐 main() agentloop.py:618)───────────────────
 
-_PROVIDER = os.environ.get("AGENT_PROVIDER", "ark")  # ark=豆包;openai_compatible=DeepSeek
-_pc = load_provider_config(_PROVIDER)
+_pc = load_provider_config()   # provider 默认走 provider.yaml(default: openai_compatible);AGENT_PROVIDER env 可覆盖
 if not _pc.api_key:
-    raise RuntimeError(f"未设置 {_PROVIDER} 的 API key,请在 code/.env 配置对应 key")
+    raise RuntimeError(f"未设置 {_pc.provider} 的 API key,请在 code/.env 配置对应 key")
 _adapter = make_adapter(_pc)
-_config = AgentConfig(model=_pc.model)
+_config = build_agent_config({"model": _pc.model})
 _workspace = Workspace(root=Path.cwd())  # web server 须在 code/ 下启动(同 REPL,PERSIST_ROOT 相对路径)
 
 _registry = _tools.registry
-# guardrail 链(同 main L629-634:7 个 guard)
-_guardrail_runner = GuardrailRunner()
-_guardrail_runner.register(PromptInjectionGuard()) \
-    .register(PermissionGuard()).register(HighRiskGuard()) \
-    .register(GitSafetyGuard()) \
-    .register(PIIGuard()).register(IndirectInjectionGuard()) \
-    .register(ToolResultPIIGuard())
-# 可靠性四件套(同 main L635-648,默认全开)
-_tool_executor = type(_tools.registry).__module__  # 占位,下面覆盖
+# guardrail 链(guardrails.yaml 控制启用清单;未知 guard 名 fail-fast)
+_guardrail_runner = build_guardrail_runner()
+# 可靠性四件套 + 执行参数(reliability.yaml)
 from agent.tools.registry import ToolExecutor
 _tool_executor = ToolExecutor(
     _registry,
     before_mutation=None,            # web 暂不接 file_history 版本链条(桌面端 diff 视图才需要,TODO)
     guardrail_runner=_guardrail_runner,
     config=_config,
-    retry_policy=RetryPolicy(),
-    retry_mode="runtime_retry",
-    idempotency_store=IdempotencyStore(),
-    audit_logger=AuditLogger(log_path=str(audit_path())),
+    **build_tool_executor_params(),
 )
+# 工具超时/截断参数(tools.yaml)
+from agent.tools.settings import configure_tools
+configure_tools(get_section("tools"))
 # memory + 工具注册(同 main L650-657)
-_memory_store = MemoryStore(memory_dir())
+_memory_store = MemoryStore(memory_dir(), **build_memory_params())
 _registry.register(make_save_memory_tool(_memory_store))
 try:
     _registry.register(make_task_tool())   # Task 工具(主 agent 派子 agent)

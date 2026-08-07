@@ -18,16 +18,20 @@ INDEX_FILE = "MEMORY.md"
 
 
 class MemoryStore:
-    def __init__(self, dir_path):
+    def __init__(self, dir_path, recall_top_k: int = 5, index_file: str = INDEX_FILE):
+        # recall_top_k / index_file 走 memory.yaml(缺省 5 / MEMORY.md)；builder 注入召回
+        # 走 ContextBuilder.memory_recall_top_k(context.yaml),是两个独立旋钮(历史遗留)。
         self.dir = Path(dir_path)
         self.dir.mkdir(parents=True, exist_ok=True)
+        self.recall_top_k = recall_top_k
+        self.index_file = index_file
 
     def _path(self, name: str) -> Path:
         return self.dir / f"{name}.md"
 
     def _index_path(self) -> Path:
-        # MEMORY.md 索引文件,常驻系统提示,不含 memory 正文
-        return self.dir / INDEX_FILE
+        # 索引文件(默认 MEMORY.md),常驻系统提示,不含 memory 正文
+        return self.dir / self.index_file
 
     def write(self, name, description, type, content) -> Path:
         """写一条 memory:写 md 文件 + 更新 MEMORY.md 索引(两步,对齐 cc)。
@@ -51,7 +55,7 @@ class MemoryStore:
         return self._parse(self._path(name))
 
     def list(self) -> list[MemoryRecord]:
-        return [self._parse(p) for p in self.dir.glob("*.md") if p.name != INDEX_FILE]
+        return [self._parse(p) for p in self.dir.glob("*.md") if p.name != self.index_file]
 
     def forget(self, name) -> bool:
         """删 md 文件 + 从 MEMORY.md 索引移除该行。"""
@@ -69,12 +73,15 @@ class MemoryStore:
             return ""
         return p.read_text(encoding="utf-8")
 
-    def recall(self, query: str, top_k: int = 5) -> list[MemoryRecord]:
+    def recall(self, query: str, top_k: int | None = None) -> list[MemoryRecord]:
         """关键词匹配召回 memory 正文(不召回索引已含的标题)。
 
         对齐 cc findRelevantMemories 的"按 query 选相关 memory",但用关键词匹配
         代替 LLM-as-selector(不引依赖、可单测)。无命中返回空。
+        top_k 缺省用 self.recall_top_k(memory.yaml,缺省 5)。
         """
+        if top_k is None:
+            top_k = self.recall_top_k
         records = self.list()
         if not records:
             return []

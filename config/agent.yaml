@@ -1,0 +1,20 @@
+# Agent 主循环参数。缺省 key = 用 config.py 的 Python 默认值（Python 默认 < YAML < env）。
+# system_prompt 不进 YAML：内容在 prompts.py（DEFAULT_SYSTEM_PROMPT，有测试断言文字，勿改）。
+model: deepseek-v4-pro        # 装配点会被 provider 的 model 覆盖（与现状 main() 一致）
+temperature: 0.7
+max_tokens: 30000
+max_steps: 25
+enable_tools: true
+max_consecutive_tool_failures: 3
+soft_stop_threshold: 3
+step_timeout: 200.0
+context_budget: null          # null=不限; int=单次请求输入侧 token 预算
+language: 中文
+include_git_info: true
+mode: react                   # react | plan_execute | workflow
+expose_reasoning: true
+thinking_budget: null
+replan_every: 3
+critic_enabled: true
+allowed_tools: []             # 空=全允许; 非空=白名单(权限隔离)
+exit_words: [exit, quit]      # REPL 退出词(agentloop main 读,非 dataclass 字段)

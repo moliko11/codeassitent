@@ -13,6 +13,7 @@
 import subprocess
 
 from ..registry import tool
+from ..settings import t
 from ...core.errors import ToolTimeoutError
 
 BASH_SCHEMA = {
@@ -31,7 +32,8 @@ BASH_SCHEMA = {
     input_schema=BASH_SCHEMA,
     mutates_external=True,   # 命令可能改文件;但 before_mutation 对 Bash 跳过(无 file_path)
 )
-def bash(command, timeout=30):
+def bash(command, timeout=None):
+    timeout = timeout if timeout is not None else t("bash.default_timeout", 30)  # tools.yaml,缺省 30
     try:
         result = subprocess.run(
             command, shell=True, capture_output=True, text=True, timeout=timeout)

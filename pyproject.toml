@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["openai", "jsonschema", "python-dotenv", "pytest", "httpx"]
+dependencies = ["openai", "jsonschema", "python-dotenv", "pytest", "httpx", "pyyaml"]
 
 [tool.pytest.ini_options]
 # eval 的 coding_tasks 各 task 用 `from source import`(sibling),设计为 _verify_tasks.py 按任务

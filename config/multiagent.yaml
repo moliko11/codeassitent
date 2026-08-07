@@ -1,0 +1,2 @@
+orchestrator:
+  max_handoffs: 5             # orchestrator.py __init__ 默认(单 Agent 最多交接次数,防无限循环)

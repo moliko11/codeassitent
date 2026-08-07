@@ -5,6 +5,7 @@ import os
 import httpx
 
 from .registry import tool
+from .settings import t
 
 
 @tool(
@@ -20,23 +21,24 @@ from .registry import tool
     },
     returns="list[{title, url, content}]",
 )
-def tavily_search(query: str, max_results: int = 3):
+def tavily_search(query: str, max_results: int | None = None):
+    max_results = max_results if max_results is not None else t("tavily_search.default_max_results", 3)  # tools.yaml,缺省 3
     api_key = os.environ.get("TAVILY_API_KEY") or os.environ.get("TAVIL_API_KEY")
     if not api_key:
         raise RuntimeError("未设置 TAVILY_API_KEY 环境变量")
     resp = httpx.post(
         "https://api.tavily.com/search",
         json={"api_key": api_key, "query": query, "max_results": max_results},
-        timeout=15,
+        timeout=t("tavily_search.timeout", 15),  # tools.yaml,缺省 15
     )
     resp.raise_for_status()
     data = resp.json()
-    # 只取摘要字段，content 截断 300 字符，避免结果过长
+    # 只取摘要字段，content 截断 content_truncate_chars 字符，避免结果过长
     return [
         {
             "title": r.get("title", ""),
             "url": r.get("url", ""),
-            "content": (r.get("content") or "")[:300],
+            "content": (r.get("content") or "")[:t("tavily_search.content_truncate_chars", 300)],
         }
         for r in data.get("results", [])
     ]

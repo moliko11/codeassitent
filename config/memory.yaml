@@ -1,0 +1,3 @@
+# MemoryStore 默认(直调 store.recall 用; builder 注入召回走 context.yaml 的 memory_recall_top_k)
+recall_top_k: 5               # store.py recall 默认(与 builder 传 3 不一致是历史遗留,见 loader 注释)
+index_file: MEMORY.md

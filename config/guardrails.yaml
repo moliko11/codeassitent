@@ -1,0 +1,9 @@
+# 只外置"启用哪些 guard";规则内容(PII 正则/prompt_injection 模式/git 白名单)留在代码。
+enabled:
+  - prompt_injection
+  - permission
+  - high_risk
+  - git_safety
+  - pii
+  - indirect_injection
+  - pii_tool_result

@@ -50,6 +50,7 @@ class ContextBuilder:
         summarizer: Optional[Callable[[list], str]] = None,
         keep_recent_turns: int = 4,
         memory_store: "MemoryStore | None" = None,
+        memory_recall_top_k: int = 3,
     ):
         """
         :param context_budget: 单次请求输入侧 token 预算上限(None=不限制)。
@@ -66,6 +67,7 @@ class ContextBuilder:
         self.summarizer = summarizer                        # 步5:超 budget 时的摘要函数(None=不摘要)
         self.keep_recent_turns = keep_recent_turns          # 步5:摘要时保留尾部 N 条
         self.memory_store = memory_store                    # 步6:长期记忆(None=不召回)
+        self.memory_recall_top_k = memory_recall_top_k      # 步6:召回 top_k(context.yaml,缺省 3)
 
     async def build(self, state: AgentState) -> BuildResult:
         """从 state 组装发给模型的 messages。
@@ -137,7 +139,7 @@ class ContextBuilder:
         # 2. 召回全文(按需,对齐 cc findRelevantMemories)
         query = self._last_user_text(messages)
         if query:
-            recalled = self.memory_store.recall(query, top_k=3)
+            recalled = self.memory_store.recall(query, top_k=self.memory_recall_top_k)
             if recalled:
                 rec_text = "\n\n".join(
                     f"## {r.name}({r.type})\n{r.description}\n\n{r.content}"

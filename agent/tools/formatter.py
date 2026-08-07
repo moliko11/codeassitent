@@ -1,13 +1,16 @@
 import json
 from .defs import ToolResult
+from .settings import t
 
 
 class ToolResultFormatter:
     """把 ToolResult 格式化成回填给模型的 text：结构化错误 + 成功结果压缩。"""
 
-    def __init__(self, strategy: str = "none", max_length: int = 2000):  # 默认 none:不截断,大结果交给 ToolResultBudget 落盘(对齐 cc)
-        self.strategy = strategy
-        self.max_length = max_length
+    def __init__(self, strategy: str | None = None, max_length: int | None = None):
+        # 默认 none:不截断,大结果交给 ToolResultBudget 落盘(对齐 cc,截断会破坏落盘无损)。
+        # tools.yaml formatter 段可覆盖,但默认必须保持 none(CLAUDE.md 约定)。
+        self.strategy = strategy if strategy is not None else t("formatter.strategy", "none")
+        self.max_length = max_length if max_length is not None else t("formatter.max_length", 2000)
 
     def format(self, result: ToolResult) -> str:
         if not result.ok:

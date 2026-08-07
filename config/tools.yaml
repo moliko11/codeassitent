@@ -1,0 +1,16 @@
+bash:
+  default_timeout: 30         # BashTool 默认超时(秒)
+web_fetch:
+  timeout: 30                 # httpx 超时(秒)
+  max_chars: 8000             # 内容转 markdown 后截断字符数
+web_search:
+  default_max_results: 5
+  timeout: 15
+  content_truncate_chars: 300
+tavily_search:
+  default_max_results: 3
+  timeout: 15
+  content_truncate_chars: 300
+formatter:                    # ToolResultFormatter
+  strategy: none              # none=只格式化不截断(对齐 cc,大结果交 ToolResultBudget 落盘)
+  max_length: 2000

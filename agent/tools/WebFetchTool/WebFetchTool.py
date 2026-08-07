@@ -11,6 +11,7 @@ import re
 import httpx
 
 from ..registry import tool
+from ..settings import t
 from .. import _runtime_state
 # ModelRequest/Message 延迟到 web_fetch 内 import:顶部 import 会与 core.models 循环
 # (tools/__init__ 初始化时 import 本模块,本模块 import core.models,core.models 又 import tools.defs -> tools/__init__)。
@@ -49,7 +50,7 @@ def web_fetch(url, prompt):
         raise ValueError("无效 URL,需 http(s)://")
     # 2. 抓(不跟随重定向)
     try:
-        resp = httpx.get(url, timeout=30, follow_redirects=False)
+        resp = httpx.get(url, timeout=t("web_fetch.timeout", 30), follow_redirects=False)  # tools.yaml,缺省 30
     except httpx.HTTPError as e:
         raise ConnectionError(f"网络错误: {e}") from e
     # 3. 跨域重定向不跟随,返回让模型重 fetch(对标 CC;简化:所有重定向都不跟随)
@@ -69,6 +70,6 @@ def web_fetch(url, prompt):
     import asyncio
     result = asyncio.run(adapter.call_llm(ModelRequest(messages=[
         Message(role="system", content="按 prompt 从网页内容提取,简洁回答"),
-        Message(role="user", content=f"网页内容:\n{markdown[:8000]}\n\n问题:{prompt}"),
+        Message(role="user", content=f"网页内容:\n{markdown[:t('web_fetch.max_chars', 8000)]}\n\n问题:{prompt}"),
     ])))
     return result.text

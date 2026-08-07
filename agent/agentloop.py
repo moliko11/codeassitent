@@ -14,9 +14,10 @@ from .prompts import SOFT_STOP_HINT, build_system_prompt
 from .control.loop_detector import LoopDetector
 from .control.planner import Planner
 from .control.critic import Critic
-from .guardrails import (GuardrailRunner, PromptInjectionGuard,
-    PermissionGuard, HighRiskGuard, PIIGuard, IndirectInjectionGuard, GitSafetyGuard,
-    ToolResultPIIGuard)
+from .config.loader import (
+    build_agent_config, build_context_builder_params, build_guardrail_runner,
+    build_memory_params, build_tool_executor_params, exit_words, get_section,
+)
 
 from .config.config import AgentConfig
 from .config.provider import load_provider_config, make_adapter
@@ -92,6 +93,9 @@ async def _run_steps(state: AgentState, context: RuntimeContext, persister, subt
         warn_sink=lambda m: print(m, file=sys.stderr),
         summarizer=make_summarizer(context.model_adapter),  # 步5:超 budget 时摘要兜底
         memory_store=context.memory_store,                  # 步6:memory 分层注入
+        # 压缩阈值/召回 top_k 走 context.yaml(缺省回落 ContextBuilder 默认);
+        # context_budget 不用 context.yaml 的,用 config.context_budget(agent.yaml),避免两个源打架。
+        **{k: v for k, v in build_context_builder_params().items() if k != "context_budget"},
     )
 
     while state.should_continue():
@@ -631,7 +635,7 @@ async def run_agent_loop(registry: ToolRegistry,
             #    注:notification 若在 _ainput 期间到达,下一轮迭代顶部排干时处理
             #    (响应性留 TODO:可 race input vs notify_queue.get 提前唤醒)。
             user_input = await _ainput("User: ")
-            if user_input.lower() in ["exit", "quit"]:
+            if user_input.lower() in set(exit_words()):   # 退出词走 agent.yaml(缺省 exit/quit)
                 print("Exiting agent loop.")
                 break
             await _do_turn(user_input)
@@ -650,45 +654,37 @@ def main():
     # 用 tools 子包的默认 registry：@tool 装饰器把 getnowtime 注册到了那里
     import agent.tools
     registry = agent.tools.registry
-    # 默认用 openai_compatible(DeepSeek)；切豆包改 "ark"
-    pc = load_provider_config("ark")
+    # 装配全部走 code/config/*.yaml(缺省回落 Python 默认,行为与旧硬编码一致)。
+    # provider 默认见 provider.yaml(现 openai_compatible/DeepSeek),AGENT_PROVIDER env 可覆盖。
+    pc = load_provider_config()
     if not pc.api_key:
-        raise SystemExit("未设置 DEEPSEEK_API_KEY，请在 code/.env 配置 DEEPSEEK_API_KEY/BASE_URL/MODEL")
+        prefix = "VOLCANO_ENGINE" if pc.provider == "ark" else "DEEPSEEK"
+        raise SystemExit(f"未设置 {prefix}_API_KEY，请在 code/.env 配置 {prefix}_API_KEY/BASE_URL/MODEL")
     model_adapter = make_adapter(pc)
-    config = AgentConfig(model=pc.model)
-    # 阶段8: GuardrailRunner + 默认 Guard(输入/工具/输出层)
-    guardrail_runner = GuardrailRunner()
-    guardrail_runner.register(PromptInjectionGuard()) \
-        .register(PermissionGuard()).register(HighRiskGuard()) \
-        .register(GitSafetyGuard()) \
-        .register(PIIGuard()).register(IndirectInjectionGuard()) \
-        .register(ToolResultPIIGuard())
-    # 可靠性四件套默认全开(对标阶段4,修复"默认三件关闭"=死代码):
-    # retry_policy + retry_mode=runtime_retry(可重试错误自动重试)、idempotency_store(幂等去重)、
-    # audit_logger(审计 JSONL)。熔断默认已在 ToolExecutor.__init__ 开。
-    from .reliability.retry import RetryPolicy
-    from .reliability.idempotency import IdempotencyStore
-    from .reliability.audit import AuditLogger
-    from .persist.paths import audit_path
+    # 用 provider 配置里的 model(DEEPSEEK_MODEL)覆盖 AgentConfig 默认,否则 agentloop 会把
+    # config.model 直接发给 API,provider 的 model 形同虚设。
+    config = build_agent_config({"model": pc.model})
+    # 阶段8: GuardrailRunner + 默认 Guard(guardrails.yaml 控制启用清单;未知 guard 名 fail-fast)
+    guardrail_runner = build_guardrail_runner()
+    # 可靠性四件套 + 执行参数(reliability.yaml;audit disabled -> audit_logger=None)。
     tool_executor = ToolExecutor(
         registry, before_mutation=_track_edit_callback,
         guardrail_runner=guardrail_runner, config=config,
-        retry_policy=RetryPolicy(), retry_mode="runtime_retry",
-        idempotency_store=IdempotencyStore(),
-        audit_logger=AuditLogger(log_path=str(audit_path())),
+        **build_tool_executor_params(),
     )
 
-     # 步6:创建 memory_store + 注册 save_memory 工具(闭包捕获 store)
+    # 工具超时/截断参数(tools.yaml),给 @tool handler 的 t() 查找用
+    from .tools.settings import configure_tools
+    configure_tools(get_section("tools"))
+    # 步6:创建 memory_store + 注册 save_memory 工具(闭包捕获 store)
     from .memory import MemoryStore
     from .persist.paths import memory_dir
     from .tools.memory_tool import make_save_memory_tool
     from .tools.task_tool import make_task_tool
-    memory_store = MemoryStore(memory_dir())
+    memory_store = MemoryStore(memory_dir(), **build_memory_params())
     registry.register(make_save_memory_tool(memory_store))
     registry.register(make_task_tool())  # 阶段10:Task 工具(主 agent 派子 agent,CC 小弟模型)
 
-    # 用 provider 配置里的 model（DEEPSEEK_MODEL）覆盖 AgentConfig 默认的 deepseek-v4-pro，
-    # 否则 agentloop 会把 context.config.model 直接发给 API，provider 的 model 形同虚设。
     import asyncio
     asyncio.run(run_agent_loop(registry, model_adapter, tool_executor, config=config))
 if __name__ == "__main__":
