@@ -35,9 +35,11 @@ def read_transcript(run_id: str):
 def _scan_transcript_tail(run_id: str) -> dict:
     """退化:无 run_meta 侧车时扫 transcript 拿 status(坑2:崩了没 RunEnd -> 无 trace 无侧车)。
     只能拿 status(token 在 trace 的 step span usage 里,transcript 没有 -> 一律 0)。
-    无 run_end 行 = 在跑/崩在 RunEnd 前 -> status='running'。read_transcript 报错 -> 'unknown'。"""
+    无 run_end 行 = 在跑/崩在 RunEnd 前 -> status='running'。read_transcript 报错 -> 'unknown'。
+    Phase 1 §1.1:顺带扫首条真实 user 消息作 title(无侧车时的标题兜底)。"""
     meta = {
         "run_id": run_id, "status": "running",
+        "title": "",
         "started_at": 0, "ended_at": 0, "duration_ms": 0.0,
         "token_input": 0, "token_output": 0, "token_total": 0,
         "step_count": 0, "tool_count": 0, "tool_success_rate": 0.0,
@@ -46,8 +48,17 @@ def _scan_transcript_tail(run_id: str) -> dict:
     try:
         last_end = None
         for rec in read_transcript(run_id):
-            if rec.get("type") == "run_end":
+            rtype = rec.get("type")
+            if rtype == "run_end":
                 last_end = rec
+            elif rtype == "user" and not meta["title"]:
+                content = rec.get("content")
+                if isinstance(content, str) and content.strip():
+                    # 跳过系统注入的合成 user 消息(与 agentloop._first_user_title 一致)
+                    text = content.strip()
+                    if text.startswith(("[plan step", "[task-notification", "[子任务", "[系统提示")):
+                        continue
+                    meta["title"] = text[:30] + "…" if len(text) > 30 else text
     except RuntimeError:
         meta["status"] = "unknown"   # transcript 过大等,读不动
         return meta
@@ -55,6 +66,26 @@ def _scan_transcript_tail(run_id: str) -> dict:
         meta["status"] = last_end.get("status", "unknown")
         meta["ended_at"] = last_end.get("ts", 0)   # perf_counter(非墙钟),退化只能给这个
     return meta
+
+
+def set_run_title(run_id: str, title: str) -> None:
+    """更新 run_meta.json 的 title(Phase 1 §1.1,前端重命名会话)。无侧车则 no-op
+    (没 RunEnd 的 run 本来也列不出来标题;重命名只对已落盘的 run 有意义)。"""
+    if not title:
+        return
+    from .paths import PERSIST_ROOT
+    meta_p = PERSIST_ROOT / run_id / "run_meta.json"
+    if not meta_p.exists():
+        return
+    try:
+        meta = json.loads(meta_p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return
+    meta["title"] = title
+    try:
+        meta_p.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        return
 
 
 def list_runs() -> list[dict]:

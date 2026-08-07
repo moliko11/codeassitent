@@ -88,9 +88,10 @@ class ArkAdapter(BaseModelAdapter):
         stream = await self.client.responses.create(**kwargs)
 
         text_parts: list[str] = []
+        thinking_parts: list[str] = []             # Phase 1:thinking 累积进 ModelResponse,落盘可恢复
         tool_acc: dict[str, dict[str, Any]] = {}  # item_id -> {call_id, name, args}
         ended_ids: set[str] = set() # 记录已收到 done 的 item_id，避免重复发 ToolCallEnd
-        usage: TokenUsage | None = None # 
+        usage: TokenUsage | None = None #
         stop_reason: str | None = None #
         response_id: str | None = None #
 
@@ -108,6 +109,7 @@ class ArkAdapter(BaseModelAdapter):
                 # 注:事件类型名基于 Responses API 推断,待真实联调确认;不匹配则不推(降级,不影响功能)
                 d = getattr(event, "delta", "") or ""
                 if d:
+                    thinking_parts.append(d)
                     sink.emit(ThinkingDelta(text=d))
 
             elif etype == "response.output_item.added":
@@ -184,6 +186,7 @@ class ArkAdapter(BaseModelAdapter):
         return ModelResponse(
             response_id=response_id,
             text="".join(text_parts) or None,
+            thinking="".join(thinking_parts) or None,   # Phase 1:thinking 累积
             tool_calls=tool_calls,
             usage=usage,
             stop_reason=stop_reason,

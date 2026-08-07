@@ -365,6 +365,22 @@
 }
 .dt-breathing-text { animation: dt-breathing 1.8s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
 
+/* Phase 1 §1.4:流式打字光标(内容已有时的块状光标,0.8s 闪烁)。 */
+@keyframes dt-cursor-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+.dt-typing-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 1px;
+  vertical-align: -2px;
+  background: var(--foreground);
+  border-radius: 1px;
+  animation: dt-cursor-blink 0.8s steps(1) infinite;
+}
+
 /* Capability / dropdown menu unfurls from the chip corner. */
 @keyframes dt-popup-up {
   from { opacity: 0; transform: translateY(6px) scale(0.96); }

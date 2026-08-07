@@ -38,6 +38,7 @@ interface ChatContextValue {
   stopStreaming: () => void;
   newChat: () => void;
   selectSession: (id: string) => void;
+  renameSession: (title: string) => Promise<void>;
   pendingApproval: ApprovalRequest | null;
   resolveApproval: (requestId: string, allow: boolean, reason?: string) => void;
 }
@@ -45,9 +46,14 @@ interface ChatContextValue {
 const ChatContext = createContext<ChatContextValue | null>(null);
 
 function toSidebarSession(r: SessionSummary): SidebarSession {
+  // Phase 1 §1.1:标题优先取 run_meta 的 title(首条 user 推导/用户重命名),没有才退化 model 名
+  const title =
+    (r.title && r.title.trim()) ||
+    (r.model ? r.model.split("/").pop() || "" : "") ||
+    "对话";
   return {
     id: r.run_id,
-    title: r.model ? r.model.split("/").pop() || "对话" : "对话",
+    title,
     updatedAt: (r.ended_at || r.started_at || 0) * 1000, // 后端是秒,前端用毫秒
   };
 }
@@ -248,9 +254,32 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     [stopStreaming],
   );
 
+  // Phase 1 §1.1:重命名当前会话 -> POST BFF -> 后端更新 session 内存态 + run_meta 侧车,
+  // 成功后刷新 sessions 让 sidebar 立即反映(标题下次 refreshSessions 也保持一致)。
+  const renameSession = useCallback(
+    async (title: string) => {
+      const next = title.trim();
+      if (!next || !activeSessionId) return;
+      try {
+        const r = await fetch(`/api/sessions/${activeSessionId}/rename`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: next }),
+        });
+        if (!r.ok) return;
+      } catch {
+        return; /* 后端未起:静默,只更新本地 */
+      }
+      setSessions((prev) =>
+        prev.map((s) => (s.id === activeSessionId ? { ...s, title: next } : s)),
+      );
+    },
+    [activeSessionId],
+  );
+
   return (
     <ChatContext.Provider
-      value={{ messages, isStreaming, sessions, activeSessionId, sendMessage, stopStreaming, newChat, selectSession, pendingApproval, resolveApproval }}
+      value={{ messages, isStreaming, sessions, activeSessionId, sendMessage, stopStreaming, newChat, selectSession, renameSession, pendingApproval, resolveApproval }}
     >
       {children}
     </ChatContext.Provider>

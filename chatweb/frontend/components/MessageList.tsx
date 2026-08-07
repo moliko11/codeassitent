@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useState } from "react";
-import { Check, Copy, Sparkles } from "lucide-react";
+import { Check, Copy, Sparkles, XCircle } from "lucide-react";
 import { useChat } from "@/context/ChatContext";
 import { useChatAutoScroll } from "@/lib/useChatAutoScroll";
 import type { ChatMessage, ToolCallView, TokenUsage } from "@/lib/types";
@@ -53,9 +53,10 @@ interface RowProps {
   toolCalls?: ToolCallView[];
   usage?: TokenUsage;
   streaming?: boolean;
+  status?: "running" | "completed" | "failed";
 }
 
-const MessageRow = memo(function MessageRow({ role, content, thinking, toolCalls, usage, streaming }: RowProps) {
+const MessageRow = memo(function MessageRow({ role, content, thinking, toolCalls, usage, streaming, status }: RowProps) {
   if (role === "user") {
     return (
       <div className="flex justify-end">
@@ -98,7 +99,18 @@ const MessageRow = memo(function MessageRow({ role, content, thinking, toolCalls
               </div>
             )}
             {content && (
-              <MarkdownRenderer content={content} className="text-[var(--foreground)]" />
+              <>
+                <MarkdownRenderer content={content} className="text-[var(--foreground)]" />
+                {/* Phase 1 §1.4:流式打字光标(内容已有时的块状光标闪烁) */}
+                {streaming && <span className="dt-typing-cursor" aria-hidden="true" />}
+              </>
+            )}
+            {/* Phase 1 §1.4:失败差异化(网络/后端错误时挂红条,区别于工具级失败) */}
+            {status === "failed" && (
+              <div className="mt-1.5 flex items-start gap-1.5 rounded-lg border border-red-500/30 bg-red-500/5 px-2.5 py-1.5 text-[12px] text-red-500/90">
+                <XCircle size={13} className="mt-0.5 shrink-0" />
+                <span>本轮出错{content ? "" : "，请检查后端服务后重试"}</span>
+              </div>
             )}
             <div className="mt-1 flex items-center gap-3">
               {!streaming && content && <CopyButton text={content} />}
@@ -174,6 +186,7 @@ export default function MessageList({
             toolCalls={m.toolCalls}
             usage={m.usage}
             streaming={m.streaming}
+            status={m.status}
           />
         ))}
       </div>

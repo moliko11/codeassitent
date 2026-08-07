@@ -9,7 +9,7 @@ import Composer from "@/components/Composer";
 import ApprovalDialog from "@/components/ApprovalDialog";
 
 function ChatShell() {
-  const { messages, sendMessage, sessions, activeSessionId } = useChat();
+  const { messages, sendMessage, sessions, activeSessionId, renameSession } = useChat();
   const activeSession = sessions.find((s) => s.id === activeSessionId);
   const [title, setTitle] = useState("新对话");
 
@@ -27,11 +27,17 @@ function ChatShell() {
     sendMessage(text);
   };
 
+  // Phase 1 §1.1:重命名 -> 本地标题 + POST 后端持久化(session 内存态 + run_meta 侧车)
+  const handleRename = (next: string) => {
+    setTitle(next);
+    void renameSession(next);
+  };
+
   return (
     <div className="flex h-screen w-screen overflow-hidden">
       <Sidebar />
       <main className="flex min-w-0 flex-1 flex-col bg-[var(--background)]">
-        <ChatHeader title={title} onRename={setTitle} />
+        <ChatHeader title={title} onRename={handleRename} />
         <MessageList onPickSuggestion={handleSend} />
         <Composer />
       </main>

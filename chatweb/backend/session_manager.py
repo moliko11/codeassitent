@@ -22,6 +22,7 @@ class SessionState:
     persister: Persister          # append 模式,跨轮不 close(session 关闭才 close)
     tracer: Tracer                # 会话级 tracer(跨轮累积 span,每轮末落 run_meta)
     created_at: float = field(default_factory=time.time)
+    title: str = ""               # Phase 1 §1.1:会话标题(首轮自动推导,前端可重命名,覆写 run_meta)
 
     def close(self):
         self.persister.close()

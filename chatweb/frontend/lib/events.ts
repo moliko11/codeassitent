@@ -41,7 +41,8 @@ export function applyEvent(msg: ChatMessage, ev: StreamEvent): ChatMessage {
     case "ToolStart":
       return { ...msg, toolCalls: (msg.toolCalls || []).map(tc => tc.callId === ev.call_id ? { ...tc, phase: "running" } : tc) };
     case "ToolEnd":
-      return { ...msg, toolCalls: (msg.toolCalls || []).map(tc => tc.callId === ev.call_id ? { ...tc, phase: ev.ok ? "done" : "error", ok: ev.ok, summary: ev.summary || undefined, elapsedMs: ev.elapsed_ms, attempts: ev.attempts } : tc) };
+      // Phase 1 §1.3:失败时带 error_type(分类展示);历史恢复路径(_transcript_to_messages)从 transcript 的 error 取
+      return { ...msg, toolCalls: (msg.toolCalls || []).map(tc => tc.callId === ev.call_id ? { ...tc, phase: ev.ok ? "done" : "error", ok: ev.ok, summary: ev.summary || undefined, elapsedMs: ev.elapsed_ms, attempts: ev.attempts, errorType: ev.ok ? undefined : (ev.error_type || undefined), errorMessage: ev.ok ? undefined : (ev.summary || undefined) } : tc) };
     case "MessageEnd":
       return { ...msg, usage: ev.usage || undefined };
     case "RunEnd":

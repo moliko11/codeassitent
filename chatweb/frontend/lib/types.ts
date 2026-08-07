@@ -18,6 +18,8 @@ export interface ToolCallView {
   summary?: string;      // ToolEnd.summary
   elapsedMs?: number;
   attempts?: number;     // ToolEnd.attempts(>1 表示重试过)
+  errorType?: string;    // Phase 1 §1.3:失败分类(ToolExecutionError/GuardrailBlocked/SchemaValidationError…)
+  errorMessage?: string; // Phase 1 §1.3:失败原因(历史恢复从 transcript error 拿,流式从 ToolEnd.error_type)
 }
 
 export interface ChatMessage {
@@ -43,6 +45,7 @@ export interface ApprovalRequest {
 // list_runs() 返回的 run_meta 摘要(对齐 _write_run_meta 字段)
 export interface SessionSummary {
   run_id: string;
+  title?: string;        // Phase 1 §1.1:会话标题(首条 user 推导/前端重命名,落 run_meta)
   status?: string;
   started_at?: number;
   ended_at?: number;

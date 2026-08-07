@@ -83,6 +83,7 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
         stream = await self.client.chat.completions.create(**kwargs)
 
         text_parts: list[str] = []
+        thinking_parts: list[str] = []             # Phase 1:thinking 累积进 ModelResponse,落盘可恢复
         tool_acc: dict[int, dict[str, Any]] = {}  # index -> {call_id, name, args}
         usage: TokenUsage | None = None
         stop_reason: str | None = None
@@ -116,6 +117,7 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
             # 与 text 分开:reasoning 是内部 CoT(暴露受 expose_reasoning 控制),text 是最终回答始终显示
             reasoning = getattr(delta, "reasoning_content", None)
             if reasoning:
+                thinking_parts.append(reasoning)
                 sink.emit(ThinkingDelta(text=reasoning))
 
             # 工具调用增量
@@ -160,6 +162,7 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
         return ModelResponse(
             response_id=response_id,
             text="".join(text_parts) or None,
+            thinking="".join(thinking_parts) or None,   # Phase 1:reasoning_content 累积
             tool_calls=tool_calls,
             usage=usage,
             stop_reason=stop_reason,
@@ -234,6 +237,7 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
         return ModelResponse(
             response_id=getattr(response, "id", None),
             text=getattr(msg, "content", None),
+            thinking=getattr(msg, "reasoning_content", None) or None,   # Phase 1:非流式 DeepSeek
             tool_calls=tool_calls,
             usage=usage,
             stop_reason=getattr(choice, "finish_reason", None),

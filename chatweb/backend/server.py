@@ -38,13 +38,13 @@ from agent.streaming.events import RunStart, RunEnd, StreamEvent
 from agent.tracing import Tracer, TraceStore
 from agent.tracing.metrics import MetricsCollector
 from agent.persist.paths import memory_dir, PERSIST_ROOT
-from agent.persist.store import list_runs, read_run_report, read_transcript
+from agent.persist.store import list_runs, read_run_report, read_transcript, set_run_title
 from agent.persist.persister import Persister
 from agent.memory import MemoryStore
 from agent.tools.memory_tool import make_save_memory_tool
 from agent.tools.task_tool import make_task_tool
 from agent.tools import _runtime_state
-from agent.agentloop import _run_turn, _emit_run_end, _write_run_meta
+from agent.agentloop import _run_turn, _emit_run_end, _write_run_meta, _first_user_title
 from agent.persist.replay import resume
 from agent.prompts import build_system_prompt
 from agent.core.messages import Message
@@ -112,6 +112,7 @@ def ensure_session(run_id: str) -> SessionState | None:
         messages=state.messages,
         persister= Persister(run_id),
         tracer=Tracer(run_id, store=TraceStore(run_id)),
+        title=_first_user_title(state.messages),   # Phase 1 §1.1:重建时从历史首条 user 推导
     )
     session_manager._sessions[run_id] = sess  # 缓存,warm path 下次直接命中
     return sess
@@ -162,6 +163,10 @@ class ApproveBody(BaseModel):
     reason: str = ""
 
 
+class RenameBody(BaseModel):
+    title: str
+
+
 @app.post("/approve/{request_id}")
 async def approve(request_id: str, body: ApproveBody):
     """HITL(阶段0 Phase A):前端弹窗用户点完,POST 回来解 future,让 web_confirmer 的 await 继续。
@@ -169,6 +174,20 @@ async def approve(request_id: str, body: ApproveBody):
     decision = ApprovalDecision(allow=body.allow, reason=body.reason)
     resolve_web_approval(request_id, decision)
     return {"ok": True}
+
+
+@app.post("/sessions/{run_id}/rename")
+async def rename_session(run_id: str, body: RenameBody):
+    """Phase 1 §1.1:重命名会话标题。session 内存态 + run_meta 侧车双写(下次 list_runs/恢复都拿到)。
+    title 只写非空;无侧车(没 RunEnd 的 run)也更新内存态,下次落盘带上。"""
+    title = (body.title or "").strip()
+    if not title:
+        raise HTTPException(status_code=422, detail="title cannot be empty")
+    sess = session_manager.get(run_id)
+    if sess:
+        sess.title = title
+    set_run_title(run_id, title)   # 无侧车时 no-op;有侧车同步落盘
+    return {"ok": True, "title": title}
 
 
 @app.post("/sessions")
@@ -230,10 +249,13 @@ async def turn(run_id: str, body: TurnBody):
         finally:
             # 同步跨轮上下文(append 返回 copy,state.messages 已离开原 list,同 REPL bug2 修复)
             sess.messages = state.messages
+            # Phase 1 §1.1:首轮自动推导标题(仅当用户未重命名过;重命名过的用用户值,不被覆盖)
+            if not sess.title:
+                sess.title = _first_user_title(state.messages)
             # 增量落盘 run_meta(对齐 REPL _do_turn L587:每轮末落,崩在下一轮前也保留)
             try:
                 rep = MetricsCollector().collect(sess.tracer.trace)
-                _write_run_meta(state, rep, _config.model)
+                _write_run_meta(state, rep, _config.model, title=sess.title or None)
             except Exception:
                 pass
 
@@ -260,9 +282,10 @@ def _transcript_to_messages(run_id: str) -> list[dict]:
     """读 transcript.jsonl -> 前端 ChatMessage 列表(恢复历史)。
 
     - user -> user 消息(跳过系统注入:[系统提示]/[task-notification]/[plan step]/[子任务])
-    - assistant -> assistant 消息(content=text, toolCalls 从 tool_calls 构造,phase=done)
-    - tool_result -> 关联到前一个 assistant 的 toolCall(按 call_id),填 ok/summary
-    - thinking/usage 不恢复(transcript 不含,流式临时);elapsedMs 不填(ToolResult 无,在 ToolEnd 事件)
+    - assistant -> assistant 消息(content=text, thinking 从 thinking 恢复, usage 从 usage 恢复,
+      toolCalls 从 tool_calls 构造,phase=done)
+    - tool_result -> 关联到前一个 assistant 的 toolCall(按 call_id),填 ok/summary/error_type/error_message
+    - elapsedMs 不填(ToolResult 无,在 ToolEnd 事件)
     """
     msgs: list[dict] = []
     try:
@@ -296,7 +319,7 @@ def _transcript_to_messages(run_id: str) -> list[dict]:
                     "argumentsJson": json.dumps(args, ensure_ascii=False),
                     "phase": "done",
                 })
-            msgs.append({
+            msg = {
                 "id": rec.get("uuid", f"a{len(msgs)}"),
                 "role": "assistant",
                 "content": text,
@@ -304,7 +327,13 @@ def _transcript_to_messages(run_id: str) -> list[dict]:
                 "streaming": False,
                 "status": "completed",
                 "createdAt": int(rec.get("ts", 0) * 1000),
-            })
+            }
+            # Phase 1 §1.2:thinking/usage 已随 log_assistant 落盘,恢复历史能拿回(不用再等流式)
+            if rec.get("thinking"):
+                msg["thinking"] = rec["thinking"]
+            if rec.get("usage"):
+                msg["usage"] = rec["usage"]
+            msgs.append(msg)
         elif t == "tool_result":
             result = rec.get("result", {}) or {}
             call_id = result.get("call_id")
@@ -319,6 +348,11 @@ def _transcript_to_messages(run_id: str) -> list[dict]:
                             tc["phase"] = "done" if ok else "error"
                             tc["ok"] = ok
                             tc["summary"] = (result.get("text") or "")[:300] or None
+                            # Phase 1 §1.3:错误差异化展示(error_type/error_message 驱动)
+                            err = result.get("error") or {}
+                            if err and not ok:
+                                tc["errorType"] = err.get("type", "ToolError")
+                                tc["errorMessage"] = (err.get("message") or "")[:300] or None
                             break
                     break
     return msgs

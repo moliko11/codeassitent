@@ -31,6 +31,7 @@ class ModelResponse:
     """大模型返回的统一响应体（所有厂商归一化）"""
     response_id: Optional[str] = None
     text: Optional[str] = None                     # 纯文本回答
+    thinking: Optional[str] = None                 # 内部 CoT/reasoning(流式 ThinkingDelta 累积;Phase 1 落盘恢复)
     tool_calls: list[ToolCall] = field(default_factory=list)  # 工具调用列表
     usage: Optional[TokenUsage] = None            # Token消耗
     stop_reason: Optional[str] = None             # 停止原因

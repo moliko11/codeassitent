@@ -381,7 +381,25 @@ def _end_run(state: AgentState, sink, persister):
         persister.log_run_end(state.status, state.error)
         persister.close()
 
-def _write_run_meta(state: AgentState, report, model: str):
+def _first_user_title(messages, limit: int = 30) -> str:
+    """从 messages 取首条真实 user 消息作会话 title(Phase 1 §1.1)。
+
+    跳过系统注入的合成 user 消息([plan step]/[task-notification]/[子任务]/[系统提示] 前缀);
+    content 可能是 dict(工具轮 user 回灌)或非 str,跳过;截断到 limit(超长加 …)。"""
+    for m in messages:
+        if getattr(m, "role", None) != "user":
+            continue
+        text = getattr(m, "content", "")
+        if not isinstance(text, str):
+            continue
+        text = text.strip()
+        if not text or text.startswith(("[plan step", "[task-notification", "[子任务", "[系统提示")):
+            continue
+        return text if len(text) <= limit else text[:limit] + "…"
+    return ""
+
+
+def _write_run_meta(state: AgentState, report, model: str, title: str | None = None):
     """RunEnd 落盘 run_meta.json 侧车(监控 M1):列表 O(1) 读摘要,不 load trace(坑3)。
     崩了没 RunEnd -> 不调本函数 -> 无侧车 -> list_runs 退化扫 transcript(坑2)。
     - status 用 state(真相),不用 report.status:REPL 的 trace 无 run span(RunStart/End
@@ -390,7 +408,8 @@ def _write_run_meta(state: AgentState, report, model: str):
       duration 来自 perf_counter 差(准),用 ended_at - duration 回推出墙钟 start。
     - token 来自 report(step span attrs["usage"] 之和,坑1:LLM 返回的精确值,非估算)。
     - system_prompt 取 state.messages 里实际注入的 system 消息(首轮 append 的;动态组装
-      build_system_prompt 后此处即动态版),保证监控展示 = 模型实际收到的。"""
+      build_system_prompt 后此处即动态版),保证监控展示 = 模型实际收到的。
+    - title:Phase 1 §1.1;显式传入(用户重命名过)用之,否则从首条 user 消息推导。"""
     import json
     from .persist.paths import run_meta_path
     # 取实际注入的 system 提示词(静态 config.system_prompt 或动态 build_system_prompt 结果)
@@ -402,6 +421,7 @@ def _write_run_meta(state: AgentState, report, model: str):
     ended_at = time.time()
     meta = {
         "run_id": state.run_id,
+        "title": title if title is not None else _first_user_title(state.messages),
         "status": state.status,
         "started_at": ended_at - (report.duration_ms or 0) / 1000.0,
         "ended_at": ended_at,

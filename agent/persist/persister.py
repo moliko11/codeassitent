@@ -23,8 +23,11 @@ class Persister:
         self._append({"type": "user", "uuid": str(uuid.uuid4()), "content": content})
 
     def log_assistant(self, model_response):
+        # Phase 1:thinking + usage 一并落盘,历史恢复能拿回(否则只有流式临时)。usage 需 _ser(非 dict)。
         self._append({"type": "assistant", "uuid": str(uuid.uuid4()),
                       "text": model_response.text,
+                      "thinking": getattr(model_response, "thinking", None),
+                      "usage": _ser(model_response.usage) if model_response.usage else None,
                       "tool_calls": _ser(model_response.tool_calls)})  # _ser 跳 raw
 
     def log_tool_result(self, result):
