@@ -1,0 +1,103 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================================================
+   监控后台主题:复用 chatweb 的 CSS 变量系统(--background/--card/--primary...),
+   主色 indigo(对齐旧 dashboard.html 的 #6366f1)。.dark 切类换肤。baseColor: zinc。
+   ============================================================================ */
+@layer base {
+  :root {
+    color-scheme: light;
+    --background: #ffffff;
+    --foreground: #09090b;
+    --card: #ffffff;
+    --card-foreground: #09090b;
+    --popover: #ffffff;
+    --popover-foreground: #09090b;
+    --primary: #4f46e5;            /* indigo-600 */
+    --primary-foreground: #ffffff;
+    --secondary: #f4f4f5;          /* zinc-100 */
+    --secondary-foreground: #18181b;
+    --muted: #f4f4f5;
+    --muted-foreground: #71717a;   /* zinc-500 */
+    --accent: #f4f4f5;
+    --accent-foreground: #18181b;
+    --destructive: #ef4444;        /* red-500 */
+    --destructive-foreground: #ffffff;
+    --border: #e4e4e7;             /* zinc-200 */
+    --input: #e4e4e7;
+    --ring: #4f46e5;
+    --radius: 0.5rem;
+    /* 语义色(图表/徽标固定色,不随主题切) */
+    --ok: #10b981;       /* emerald-500 */
+    --warn: #f59e0b;     /* amber-500 */
+    --err: #ef4444;      /* red-500 */
+  }
+
+  .dark {
+    color-scheme: dark;
+    --background: #09090b;
+    --foreground: #fafafa;
+    --card: #18181b;             /* zinc-900 */
+    --card-foreground: #fafafa;
+    --popover: #18181b;
+    --popover-foreground: #fafafa;
+    --primary: #6366f1;          /* indigo-500,暗色亮一点 */
+    --primary-foreground: #ffffff;
+    --secondary: #27272a;        /* zinc-800 */
+    --secondary-foreground: #fafafa;
+    --muted: #27272a;
+    --muted-foreground: #a1a1aa; /* zinc-400 */
+    --accent: #27272a;
+    --accent-foreground: #fafafa;
+    --destructive: #f43f5e;
+    --destructive-foreground: #ffffff;
+    --border: #27272a;
+    --input: #27272a;
+    --ring: #6366f1;
+  }
+
+  * {
+    @apply border-[color:var(--border)];
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+
+  html, body { height: 100%; }
+  html { -webkit-font-smoothing: antialiased; }
+  body {
+    @apply antialiased;
+    background: var(--background);
+    color: var(--foreground);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  button, input, select, textarea { font: inherit; }
+}
+
+@layer components {
+  .surface-card {
+    @apply rounded-xl border bg-[var(--card)] shadow-sm;
+  }
+}
+
+@layer utilities {
+  .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+  .hide-scrollbar::-webkit-scrollbar { display: none; }
+  .mono { font-family: ui-monospace, "SF Mono", Consolas, "Cascadia Code", monospace; }
+}
+
+/* 滚动条 */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--muted-foreground); }
+
+/* react-markdown prose(系统提示词段 body,简化版) */
+.prose-sm { line-height: 1.7; font-size: 13px; }
+.prose-sm p { margin: 0.4rem 0; }
+.prose-sm ul { list-style: disc outside; margin: 0.4rem 0; padding-left: 1.25rem; }
+.prose-sm ol { list-style: decimal outside; margin: 0.4rem 0; padding-left: 1.25rem; }
+.prose-sm li { margin: 0.15rem 0; }
+.prose-sm code { font-family: ui-monospace, Consolas, monospace; background: var(--muted); padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 12px; }
+.prose-sm strong { font-weight: 600; }

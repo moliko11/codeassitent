@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from agent.persist import paths as ppaths          # 动态读 PERSIST_ROOT(测试 monkeypatch 生效)
 from agent.persist import list_runs, read_run_report, read_transcript
@@ -61,11 +61,13 @@ def _read_run_meta(run_id: str) -> dict | None:
     return _scan_transcript_tail(run_id)   # 退化:扫 transcript 末尾 run_end 拿 status(token=0)
 
 
-# ── M3 UI:单页 dashboard ──
+# ── M3 UI:迁移到 React 前端(code/monitor/frontend),旧 dashboard.html 保留在 templates/ 备用 ──
 
-@app.get("/", response_class=HTMLResponse)
-def dashboard():
-    return (_TEMPLATES / "dashboard.html").read_text(encoding="utf-8")
+@app.get("/")
+def root():
+    """迁移到 React 前端后:重定向到前端 dev server(:5173)。
+    生产可由反向代理或挂载 frontend/dist 静态文件接管。"""
+    return RedirectResponse(url="http://localhost:5173")
 
 
 # ── M2 API ──
