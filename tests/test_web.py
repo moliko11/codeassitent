@@ -148,10 +148,15 @@ def test_transcript_endpoint():
 # ───────────────────────── UI ─────────────────────────
 
 def test_index_html():
-    """GET / -> dashboard HTML(含页面标记)。"""
-    r = client.get("/")
-    assert r.status_code == 200
-    assert "监控" in r.text and "dashboard" in r.text.lower()
+    """GET / -> 307 重定向到 React 前端 dev server(:5173)。
+
+    监控后台 React 化后(M3),后端 `/` 改为重定向到 Vite dev server;
+    旧 dashboard.html 保留在 templates/ 备用,生产由反向代理或挂载 frontend/dist 接管。
+    不再断言返回 HTML(React 迁移前的老行为)。
+    """
+    r = client.get("/", follow_redirects=False)
+    assert r.status_code == 307
+    assert r.headers["location"] == "http://localhost:5173"
 
 
 def test_api_system_prompt():
