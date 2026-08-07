@@ -1,6 +1,7 @@
-// lib/events.ts - 后端 12 流式事件的 TS 类型 + reducer(对齐 events.py:107)
+// lib/events.ts - 后端 13 流式事件的 TS 类型 + reducer(对齐 events.py:107)
 // 一个 turn 的事件流聚合成一条 ChatMessage。关联键 call_id:
 // ToolCallStart/Delta/End(模型产参)与 ToolStart/End(执行器执行)按 call_id 聚合成一个 ToolCallView。
+// ApprovalRequestEvent(HITL)不进消息体——ChatContext 捕获它弹 ApprovalDialog。
 import type { ChatMessage, ToolCallView, TokenUsage } from "./types";
 
 export type StreamEvent =
@@ -10,6 +11,7 @@ export type StreamEvent =
   | { type: "RunEnd"; status: string; final_text: string | null; error: Record<string, unknown> | null }
   | { type: "ToolStart"; call_id: string; tool_name: string; arguments: Record<string, unknown> }
   | { type: "ToolEnd"; call_id: string; tool_name: string; ok: boolean; elapsed_ms: number; error_type: string | null; summary: string | null; attempts: number }
+  | { type: "ApprovalRequestEvent"; request_id: string; tool_name: string; reason: string; arguments: Record<string, unknown> }
   | { type: "TextDelta"; text: string }
   | { type: "ThinkingDelta"; text: string }
   | { type: "ToolCallStart"; call_id: string; tool_name: string; index: number }

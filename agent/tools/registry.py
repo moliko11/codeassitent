@@ -1,7 +1,10 @@
 # 工具注册表与执行器
 # 可靠性(retry/熔断/幂等/审计)在 execute 内部；流式(as_completed+sink)在 _parallel 层。
 # 两者正交：_parallel 并行调度 + 发 ToolStart/ToolEnd，execute 内部走可靠性管道。
+# 权限(whitelist/git/high_risk)是第三正交维：async can_use_tool 在 _parallel 层、execute 前调。
+import os
 import time
+from dataclasses import dataclass
 
 import jsonschema
 from jsonschema.exceptions import ValidationError
@@ -16,6 +19,8 @@ from .formatter import ToolResultFormatter
 
 from .defs import Tool, ToolCall, ToolResult, ToolSpec
 from ..streaming.events import ToolStart, ToolEnd
+from ..guardrails.confirmer import ApprovalRequest, Confirmer, cli_confirmer
+from ..guardrails.git_safety import classify_git_command, GitDecision, _is_bare_repo
 
 
 def _result_summary(result: ToolResult, limit: int = 80) -> str | None:
@@ -77,12 +82,20 @@ class _GuardContext:
         self.registry = registry
 
 
+@dataclass
+class PermissionDecision:
+    """can_use_tool 返回:allowed=False 时 reason 作 GuardrailBlocked 的 message 回填模型。"""
+    allowed: bool
+    reason: str = ""
+
+
 class ToolExecutor:
     def __init__(self, registry: ToolRegistry, formatter=None, *,
                  retry_policy: RetryPolicy = None, retry_mode="llm_retry",
                  breaker_config=BreakerConfig(), idempotency_store: IdempotencyStore = None,
                  audit_logger: AuditLogger = None,
                  before_mutation=None, guardrail_runner=None, config=None,
+                 confirmer: Confirmer = None,
                  parallelism=8, max_workers=1, result_summary_chars=80):
         """工具执行器。
 
@@ -92,6 +105,10 @@ class ToolExecutor:
         - breaker_config: 熔断器配置，per-tool 保护下游。
         - idempotency_store: 幂等去重缓存，按 key 缓存成功结果。
         - audit_logger: 审计日志，记录 who/what/when/result。
+
+        HITL(阶段0/Phase A)：
+        - confirmer: async 确认器(默认 cli_confirmer;web 注入 web_confirmer)。can_use_tool
+          在 async execute_many 层、工具执行前调它(对标 CC canUseTool);拒绝回填 GuardrailBlocked。
 
         执行参数(reliability.yaml execution 段)：
         - parallelism: _parallel 并发工具调用的 Semaphore 上限。
@@ -107,8 +124,9 @@ class ToolExecutor:
         self.audit_logger = audit_logger
         self._breakers: dict[str, CircuitBreaker] = {}   # per-tool 懒建
         self.before_mutation = before_mutation   # 留点：将来 FileEditTool 在这 track_edit(备份编辑前内容)
-        self.guardrail_runner = guardrail_runner  # 阶段8:before_tool/after_tool 护栏(None=不校验)
-        self.config = config  # 阶段8:Guardrail.check 读 config.allowed_tools
+        self.guardrail_runner = guardrail_runner  # 阶段8:after_tool 护栏(None=不校验);before_tool 权限已移到 can_use_tool
+        self.config = config  # 阶段8:can_use_tool 读 config.allowed_tools
+        self.confirmer = confirmer or cli_confirmer   # HITL(Phase A):默认 CLI;web 注入 web_confirmer
         self.parallelism = parallelism
         self.max_workers = max_workers
         self.result_summary_chars = result_summary_chars
@@ -116,10 +134,55 @@ class ToolExecutor:
     def _get_breaker(self, tool_name) -> CircuitBreaker:
         return self._breakers.setdefault(tool_name, CircuitBreaker(self.breaker_config))
 
+    async def can_use_tool(self, call) -> "PermissionDecision":
+        """CC canUseTool 同款:async,工具执行前,整合所有权限判定。
+        本地判定(whitelist/git ALLOW·BLOCK)直接返回;需人(git ASK/high_risk)走 confirmer。
+        拒绝 -> _parallel 回填 ToolResult(error=GuardrailBlocked),不执行。"""
+        # 1. whitelist(原 PermissionGuard):allowed_tools 非空时只放行列表内工具
+        allowed = getattr(self.config, "allowed_tools", []) or []
+        if allowed and call.tool_name not in allowed:
+            return PermissionDecision(False, f"工具 {call.tool_name} 不在 allowed_tools")
+
+        # 2. git 分类(原 GitSafetyGuard:ALLOW/BLOCK 本地;ASK 走人)。bare repo 检测保留(RCE via hooks)
+        if call.tool_name == "bash":
+            cmd = (call.arguments or {}).get("command") or ""
+            gd = classify_git_command(cmd)
+            if gd != GitDecision.NOT_GIT:
+                try:
+                    cwd = os.getcwd()
+                except OSError:
+                    cwd = None
+                if cwd is not None and _is_bare_repo(cwd):
+                    return PermissionDecision(False, "当前目录是 bare git repo(顶层含 HEAD/objects/refs,"
+                                                    "无 .git/HEAD),跑 git 会触发其 hooks(RCE),已硬拦")
+                if gd == GitDecision.BLOCK:
+                    return PermissionDecision(False, "git 命令含 config 注入 flag(-c/--exec-path/--config-env)"
+                                                    "或 --output,已硬拦(防 RCE / 任意文件写)")
+                if gd == GitDecision.ASK:
+                    req = ApprovalRequest("bash", f"git 写命令需确认:\n{cmd}", call.arguments, call.call_id)
+                    d = await self.confirmer(req)
+                    if not d.allow:
+                        return PermissionDecision(False, d.reason)
+            # NOT_GIT / ALLOW -> 继续
+
+        # 3. high_risk(原 HighRiskGuard):工具不在 registry 交 precheck,不在此拦截
+        try:
+            tool = self.registry.get_tool(call.tool_name)
+            if getattr(tool.tool_spec, "high_risk", False):
+                req = ApprovalRequest(call.tool_name, "高风险工具需人工批准", call.arguments, call.call_id)
+                d = await self.confirmer(req)
+                if not d.allow:
+                    return PermissionDecision(False, d.reason)
+        except Exception:
+            pass  # 工具不存在交 precheck 处理
+
+        return PermissionDecision(True)
+
     def execute(self, call, *, timeout=None, cancel_event=None, user_id=None) -> ToolResult:
         """工具执行管道：审计 -> 前置门禁 -> 幂等 -> 熔断 -> retry -> 熔断记录 -> 幂等缓存 -> fallback -> 收尾。
 
-        流式（ToolStart/ToolEnd）不在本方法发——由 _parallel 层负责，保持 execute 纯净。
+        权限(whitelist/git/high_risk)已移到 async can_use_tool(execute_many 层,对标 CC canUseTool);
+        本方法只剩可靠性管道 + after_tool 脱敏(纯本地后处理)。流式（ToolStart/ToolEnd）由 _parallel 层发。
         """
         start_ts = self._audit_before(call, user_id)
 
@@ -127,19 +190,6 @@ class ToolExecutor:
         tool, pre_err = self._precheck(call)
         if pre_err is not None:
             return self._done(pre_err, call, user_id, start_ts)
-
-        # 阶段8: before_tool Guardrail(权限白名单 / 高风险审批)
-        if self.guardrail_runner is not None:
-            gctx = _GuardContext(config=self.config, registry=self.registry)
-            gr = self.guardrail_runner.run("before_tool", call, gctx)
-            if gr.action == "needs_approval":
-                # 阶段8 HITL:抛 ApprovalRequired,agentloop 捕获转 waiting_approval
-                return self._done(ToolResult(call_id=call.call_id, tool_name=call.tool_name, ok=False, error={"type": "NeedsApproval", "message": gr.reason, "retryable": False}, meta=call.meta), call, user_id, start_ts)
-            if gr.action == "block":
-                blocked = ToolResult(call_id=call.call_id, tool_name=call.tool_name,
-                    ok=False, error={"type": "GuardrailBlocked", "message": gr.reason, "retryable": False},
-                    meta=call.meta)
-                return self._done(blocked, call, user_id, start_ts)
 
         # 变更前钩子（留点：mutates_external 的工具编辑前备份，同 CC trackEdit）
         if tool.tool_spec.mutates_external and self.before_mutation:
@@ -336,6 +386,14 @@ class ToolExecutor:
 
         async def run_one(c):
             async with sem:
+                # CC canUseTool 同款:执行前 async 权限门(whitelist/git/high_risk)。
+                # deny 不回填 execute,直接产 GuardrailBlocked ToolResult(模型下轮看到"未获确认")。
+                perm = await self.can_use_tool(c)
+                if not perm.allowed:
+                    return self._finalize(ToolResult(
+                        call_id=c.call_id, tool_name=c.tool_name, ok=False,
+                        error={"type": "GuardrailBlocked", "message": perm.reason,
+                               "retryable": False}, meta=c.meta))
                 return await asyncio.to_thread(self.execute, c, timeout=timeout,
                                                cancel_event=cancel_event, user_id=user_id)
 

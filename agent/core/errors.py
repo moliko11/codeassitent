@@ -64,9 +64,6 @@ def classify_tool_error(e: BaseException) -> dict[str, Any]:
     return {"type": name, "message": str(e), "retryable": True, "source": "tool_executor"}
 
 
-class ApprovalRequired(Exception):
-    """高风险工具需人工审批(阶段8 HITL)。execute 抛,agentloop 捕获转 waiting_approval。"""
-    def __init__(self, call, reason: str = ""):
-        self.call = call
-        self.reason = reason
-        super().__init__(f"高风险工具 {getattr(call, 'tool_name', '?')} 需审批: {reason}")
+# ApprovalRequired 已随阶段0(Phase A)删除:高风险 HITL 从"execute 抛异常 -> waiting_approval"
+# 改为 async can_use_tool + confirmer(await 人,拒绝回填 GuardrailBlocked),不再需要该同步信号。
+# 见 docs/topics/hitl-approval-design.md §3。

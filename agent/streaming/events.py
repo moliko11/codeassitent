@@ -60,6 +60,19 @@ class ToolEnd:
     attempts: int = 1   # 实际尝试次数(含首次);>1 表示发生过重试,MetricsCollector 算 retry_count 用(#6)
 
 
+@dataclass(frozen=True)
+class ApprovalRequestEvent:
+    """HITL:需人工批准的工具请求(web_confirmer 经 SSE 队列推前端弹窗)。
+
+    不进 EventSink(web_confirmer 直接 put 到 SSE 队列,不走 sink/ tracer 链)。
+    前端收到 -> 弹窗 -> POST /approve/{request_id} 解 future(见 guardrails/confirmer.py)。
+    """
+    request_id: str
+    tool_name: str
+    reason: str
+    arguments: dict[str, Any]
+
+
 # ─────────────────── 低层：LLM 流式增量（adapter 发） ───────────────────
 
 @dataclass(frozen=True)
@@ -106,7 +119,7 @@ class MessageEnd:
 
 StreamEvent = Union[
     # 高层
-    RunStart, StepStart, StepEnd, RunEnd, ToolStart, ToolEnd,
+    RunStart, StepStart, StepEnd, RunEnd, ToolStart, ToolEnd, ApprovalRequestEvent,
     # 低层
     TextDelta, ThinkingDelta, ToolCallStart, ToolCallDelta, ToolCallEnd, MessageEnd,
 ]

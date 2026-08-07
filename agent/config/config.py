@@ -26,7 +26,7 @@ class AgentConfig:
     replan_every: int = 3  # plan_execute 模式:每 N 步调 Critic 评估计划漂移
     critic_enabled: bool = True  # plan_execute 模式:是否过 Critic 验收
     # ---- 阶段 10:多 Agent 权限隔离(题16)----
-    # 空 list=全允许(默认,兼容单 agent);PermissionGuard(stage8)读它做白名单:非空时只放行列表内工具。
+    # 空 list=全允许(默认,兼容单 agent);can_use_tool(阶段0)读它做白名单:非空时只放行列表内工具。
     # Agent.run 用 dataclasses.replace 把 self.tools 写进 child_config,实现 per-agent 工具隔离。
     allowed_tools: list[str] = field(default_factory=list)
 

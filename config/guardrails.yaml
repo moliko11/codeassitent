@@ -1,9 +1,8 @@
-# 只外置"启用哪些 guard";规则内容(PII 正则/prompt_injection 模式/git 白名单)留在代码。
+# 只外置"启用哪些 guard";规则内容(PII 正则/prompt_injection 模式)留在代码。
+# 阶段0(Phase A):permission/high_risk/git_safety 移到 ToolExecutor.can_use_tool(async,confirmer),
+# 不再注册为 guard。如需纯本地 before_tool 守卫,在此重开(factory._GUARDS 加回即可)。
 enabled:
   - prompt_injection
-  - permission
-  - high_risk
-  - git_safety
   - pii
   - indirect_injection
   - pii_tool_result

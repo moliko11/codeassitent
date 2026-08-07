@@ -14,13 +14,17 @@ export async function POST(req: NextRequest) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ input }),
   });
-  if (!upstream.ok || !upstream.body) {
+  if (!upstream.ok) {
     return new Response(await upstream.text(), { status: upstream.status });
+  }
+  const body = upstream.body;
+  if (!body) {
+    return new Response("upstream empty body", { status: 502 });
   }
   // 显式 ReadableStream pipe,避免 Next.js dev buffer 整个 SSE 响应
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      const reader = upstream.body.getReader();
+      const reader = body.getReader();
       try {
         while (true) {
           const { done, value } = await reader.read();

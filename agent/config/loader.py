@@ -191,10 +191,9 @@ def build_multiagent_params() -> dict:
 # ─────────────────── guardrails ───────────────────
 
 def load_guardrail_names() -> list[str]:
-    """guardrails.yaml enabled 清单；缺省 = 现 7 个默认 guard。"""
+    """guardrails.yaml enabled 清单；缺省 = 现 4 个默认 guard(权限三 guard 已移到 can_use_tool)。"""
     return list(get_section("guardrails").get("enabled") or [
-        "prompt_injection", "permission", "high_risk", "git_safety",
-        "pii", "indirect_injection", "pii_tool_result",
+        "prompt_injection", "pii", "indirect_injection", "pii_tool_result",
     ])
 
 

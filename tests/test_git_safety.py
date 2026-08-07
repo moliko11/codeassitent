@@ -7,19 +7,22 @@
 - 归一化:剥 env var 前缀 + shell quote 后再判(防绕过)
 - 复合命令 / 命令替换含 git -> ask(防 git log && rm 绕过)
 
-不依赖真实 LLM / 真实 git:分类器纯函数单测;guardrail 用 mock confirmer;
+阶段0(Phase A)起:git 门禁从同步 Guardrail 移到 async can_use_tool
+(原 GitSafetyGuard 已删,逻辑并入 ToolExecutor.can_use_tool)。
+不依赖真实 LLM / 真实 git:分类器纯函数单测;can_use_tool 用 mock confirmer;
 executor 级只测 block / ask-denied 两条(均在 subprocess 前短路,不跑 git)。
 运行(从 code/ 目录,3.12 venv):python -m pytest tests/test_git_safety.py -v
 """
+import asyncio
 import os
 import tempfile
 
 import pytest
 
-from agent.guardrails import GitSafetyGuard, GuardrailRunner, classify_git_command, GitDecision
-from agent.guardrails.guardrail import GuardrailResult
-from agent.tools.defs import ToolCall, ToolSpec, Tool
-from agent.tools.registry import ToolRegistry, ToolExecutor
+from agent.guardrails import classify_git_command, GitDecision
+from agent.guardrails.confirmer import ApprovalDecision
+from agent.tools.defs import ToolCall
+from agent.tools.registry import ToolExecutor
 
 
 # ─────────────────── 分类器(纯函数)───────────────────
@@ -147,70 +150,87 @@ def test_cd_git_compound_ask():
     assert classify_git_command("cd /tmp/evil && git push") == GitDecision.ASK
 
 
-# ─────────────────── Guardrail(注入 mock confirmer)───────────────────
+# ─────────────────── can_use_tool(注入 mock confirmer,阶段0 Phase A)───────────────────
 
 def _call(command):
     return ToolCall(call_id="c1", tool_name="bash", arguments={"command": command})
 
 
-def _ctx():
-    class _Ctx:
-        config = None
-        registry = None
-    return _Ctx()
+def _tool_executor(confirmer=None):
+    import agent.tools  # 触发 bash 注册到模块级 registry
+    return ToolExecutor(agent.tools.registry, confirmer=confirmer)
 
 
-def test_guard_allow_readonly_no_confirm():
+def _no_confirm():
+    def boom(req):
+        raise AssertionError("不应调 confirmer")
+    return boom
+
+
+# confirmer 协议是 async(await self.confirmer(req)),mock 须返回 awaitable。
+def _allow():
+    async def c(req):
+        return ApprovalDecision(allow=True)
+    return c
+
+
+def _deny(reason="用户拒绝"):
+    async def c(req):
+        return ApprovalDecision(allow=False, reason=reason)
+    return c
+
+
+def test_can_use_tool_readonly_git_no_confirm():
     """只读 git:不调 confirmer 即放行(用会抛异常的 confirmer 验证不被调)。"""
-    def boom(command):
-        raise AssertionError("只读命令不应调 confirmer")
-    g = GitSafetyGuard(confirmer=boom)
-    assert g.check(_call("git log"), _ctx()).action == "allow"
-    assert g.check(_call("git diff HEAD"), _ctx()).action == "allow"
+    exe = _tool_executor(confirmer=_no_confirm())
+    d = asyncio.run(exe.can_use_tool(_call("git log")))
+    assert d.allowed is True
+    d2 = asyncio.run(exe.can_use_tool(_call("git diff HEAD")))
+    assert d2.allowed is True
 
 
-def test_guard_block_config_injection():
+def test_can_use_tool_config_injection_blocked():
     """config 注入 flag:block(硬拦,不询问)。"""
-    g = GitSafetyGuard()
-    r = g.check(_call("git -c core.fsmonitor=evil status"), _ctx())
-    assert r.action == "block"
-    assert "RCE" in r.reason or "config 注入" in r.reason
+    exe = _tool_executor()
+    d = asyncio.run(exe.can_use_tool(_call("git -c core.fsmonitor=evil status")))
+    assert d.allowed is False
+    assert "RCE" in d.reason or "config 注入" in d.reason
 
 
-def test_guard_ask_approved():
-    """写命令 + confirmer=True -> allow。"""
-    g = GitSafetyGuard(confirmer=lambda c: True)
-    assert g.check(_call("git push"), _ctx()).action == "allow"
-    assert g.check(_call("git commit -m x"), _ctx()).action == "allow"
+def test_can_use_tool_git_ask_approved():
+    """写命令 + confirmer allow -> allowed。"""
+    exe = _tool_executor(confirmer=_allow())
+    assert asyncio.run(exe.can_use_tool(_call("git push"))).allowed is True
+    assert asyncio.run(exe.can_use_tool(_call("git commit -m x"))).allowed is True
 
 
-def test_guard_ask_denied():
-    """写命令 + confirmer=False -> block(回填模型:用户拒绝)。"""
-    g = GitSafetyGuard(confirmer=lambda c: False)
-    r = g.check(_call("git push"), _ctx())
-    assert r.action == "block"
-    assert "拒绝" in r.reason
+def test_can_use_tool_git_ask_denied():
+    """写命令 + confirmer deny -> denied(拒绝原因回填)。"""
+    exe = _tool_executor(confirmer=_deny())
+    d = asyncio.run(exe.can_use_tool(_call("git push")))
+    assert d.allowed is False
+    assert "用户拒绝" in d.reason
 
 
-def test_guard_non_bash_tool_passes():
+def test_can_use_tool_non_bash_tool_passes():
     """非 bash 工具:放行(不归 git 门禁管)。"""
-    g = GitSafetyGuard()
+    exe = _tool_executor(confirmer=_no_confirm())
     other = ToolCall(call_id="c2", tool_name="read", arguments={"file_path": "x"})
-    assert g.check(other, _ctx()).action == "allow"
+    assert asyncio.run(exe.can_use_tool(other)).allowed is True
 
 
-def test_guard_non_git_bash_passes():
+def test_can_use_tool_non_git_bash_passes():
     """bash 但非 git 命令:放行(交执行)。"""
-    g = GitSafetyGuard()
-    assert g.check(_call("echo hello"), _ctx()).action == "allow"
-    assert g.check(_call("ls -la"), _ctx()).action == "allow"
+    exe = _tool_executor(confirmer=_no_confirm())
+    assert asyncio.run(exe.can_use_tool(_call("echo hello"))).allowed is True
+    assert asyncio.run(exe.can_use_tool(_call("ls -la"))).allowed is True
 
 
-def test_guard_compound_ask_then_block_if_denied():
-    """复合命令 git log && rm:ask;denied -> block(不静默执行 rm)。"""
-    g = GitSafetyGuard(confirmer=lambda c: False)
-    r = g.check(_call("git log && rm -rf /"), _ctx())
-    assert r.action == "block"
+def test_can_use_tool_compound_ask_denied():
+    """复合命令 git log && rm:ask;denied -> denied(不静默执行 rm)。"""
+    exe = _tool_executor(confirmer=_deny(reason="拒绝"))
+    d = asyncio.run(exe.can_use_tool(_call("git log && rm -rf /")))
+    assert d.allowed is False
 
 
 # ─────────────────── P1:bare repo 检测(RCE via hooks)───────────────────
@@ -248,62 +268,56 @@ def test_is_bare_repo_with_gitdir_not_bare():
         assert _is_bare_repo(d) is False
 
 
-def test_guard_blocks_git_in_bare_repo(monkeypatch, tmp_path):
-    """bare repo cwd 下任何 git 命令 -> block(早于子命令判定,防 hooks RCE)。"""
+def test_can_use_tool_blocks_git_in_bare_repo(monkeypatch, tmp_path):
+    """bare repo cwd 下任何 git 命令 -> denied(早于子命令判定,防 hooks RCE)。"""
     (tmp_path / "objects").mkdir()
     (tmp_path / "refs").mkdir()
     (tmp_path / "HEAD").write_text("ref: refs/heads/main\n")
     monkeypatch.chdir(tmp_path)
-    g = GitSafetyGuard()
-    r = g.check(_call("git log"), _ctx())
-    assert r.action == "block"
-    assert "bare" in r.reason
-    assert g.check(_call("git push"), _ctx()).action == "block"  # 写命令也拦
+    exe = _tool_executor()
+    d = asyncio.run(exe.can_use_tool(_call("git log")))
+    assert d.allowed is False
+    assert "bare" in d.reason
+    d2 = asyncio.run(exe.can_use_tool(_call("git push")))   # 写命令也拦
+    assert d2.allowed is False
 
 
-def test_guard_allows_git_in_normal_dir(monkeypatch, tmp_path):
+def test_can_use_tool_allows_git_in_normal_dir(monkeypatch, tmp_path):
     """普通目录(非 bare)下只读 git 仍 allow(bare 检测不误伤)。"""
     monkeypatch.chdir(tmp_path)
-    g = GitSafetyGuard(confirmer=lambda c: False)  # 只读不调 confirmer,deny 闭包不影响
-    assert g.check(_call("git log"), _ctx()).action == "allow"
+    exe = _tool_executor(confirmer=_deny())  # 只读不调 confirmer,deny 闭包不影响
+    assert asyncio.run(exe.can_use_tool(_call("git log"))).allowed is True
 
 
-# ─────────────────── executor 级接线(不跑 subprocess)───────────────────
+# ─────────────────── executor 级接线(execute_many,不跑 subprocess)───────────────────
 
-def _registry_with_bash():
-    import agent.tools  # 触发 bash 注册到默认 registry
-    return agent.tools.registry
+def _execute_many(exe, call):
+    async def run():
+        async for r in exe.execute_many([call]):
+            return r
+    return asyncio.run(run())
 
 
-def test_executor_blocks_config_injection():
-    """executor + GitSafetyGuard:git -c ... -> ToolResult ok=False, GuardrailBlocked(不跑 git)。"""
-    reg = _registry_with_bash()
-    runner = GuardrailRunner().register(GitSafetyGuard())
-    exe = ToolExecutor(reg, guardrail_runner=runner, config=None)
-    r = exe.execute(ToolCall(call_id="c1", tool_name="bash",
-        arguments={"command": "git -c core.fsmonitor=evil status"}))
+def test_execute_many_blocks_config_injection():
+    """execute_many:git -c ... -> ToolResult ok=False, GuardrailBlocked(不跑 git)。"""
+    exe = _tool_executor()
+    r = _execute_many(exe, _call("git -c core.fsmonitor=evil status"))
     assert r.ok is False
     assert r.error["type"] == "GuardrailBlocked"
 
 
-def test_executor_ask_denied_returns_error():
-    """executor + GitSafetyGuard(denied):git push -> ToolResult ok=False(回填模型)。"""
-    reg = _registry_with_bash()
-    runner = GuardrailRunner().register(GitSafetyGuard(confirmer=lambda c: False))
-    exe = ToolExecutor(reg, guardrail_runner=runner, config=None)
-    r = exe.execute(ToolCall(call_id="c2", tool_name="bash",
-        arguments={"command": "git push"}))
+def test_execute_many_ask_denied_returns_error():
+    """execute_many:git push 被 deny -> ToolResult ok=False(拒绝原因回填模型)。"""
+    exe = _tool_executor(confirmer=_deny())
+    r = _execute_many(exe, _call("git push"))
     assert r.ok is False
     assert r.error["type"] == "GuardrailBlocked"
-    assert "拒绝" in r.error["message"]
+    assert "用户拒绝" in r.error["message"]
 
 
-def test_executor_non_git_bash_runs():
-    """executor + GitSafetyGuard:非 git bash 命令正常执行(门禁不拦)。"""
-    reg = _registry_with_bash()
-    runner = GuardrailRunner().register(GitSafetyGuard())
-    exe = ToolExecutor(reg, guardrail_runner=runner, config=None)
-    r = exe.execute(ToolCall(call_id="c3", tool_name="bash",
-        arguments={"command": "echo ok"}))
+def test_execute_many_non_git_bash_runs():
+    """execute_many:非 git bash 命令正常执行(门禁不拦)。"""
+    exe = _tool_executor()
+    r = _execute_many(exe, _call("echo ok"))
     assert r.ok is True
     assert "ok" in r.data["stdout"]

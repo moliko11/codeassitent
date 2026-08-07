@@ -14,12 +14,14 @@ class GuardrailResult:
 
     - passed=True + action=allow:通过
     - passed=False + action=block:拦截(不执行/不回填)
-    - action=needs_approval:触发 HITL(高风险工具,转 waiting_approval)
     - action=sanitize:passed=True 但内容需脱敏(sanitized 放脱敏后内容)
+
+    阶段0(Phase A):needs_approval 已删——HITL 提到 async can_use_tool(executor 层,
+    工具执行前,走 confirmer),不再由同步 guardrail 产 HITL 信号。见 hitl-approval-design.md §3。
     """
     passed: bool
     reason: str = ""
-    action: Literal["allow", "block", "needs_approval", "sanitize"] = "allow"
+    action: Literal["allow", "block", "sanitize"] = "allow"
     sanitized: Any = None  # action=sanitize 时放脱敏后的内容
 
 
@@ -44,7 +46,7 @@ class GuardrailRunner:
     """按挂载点跑所有注册的 Guardrail。
 
     规则:
-    - block / needs_approval 即短路(返回该结果,不跑后续)
+    - block 即短路(返回该结果,不跑后续)
     - sanitize 累积(多个 sanitize 叠加,后一个拿前一个的 sanitized 作输入)
     - allow 不影响,继续下一个
     - 全通过:有 sanitize 发生则返回 sanitize(带最终 sanitized),否则 allow
@@ -65,7 +67,7 @@ class GuardrailRunner:
         sanitized_happened = False
         for g in self._guards.get(mount, []):
             result = g.check(current, context)
-            if result.action in ("block", "needs_approval"):
+            if result.action == "block":
                 return result  # 短路
             if result.action == "sanitize" and result.sanitized is not None:
                 current = result.sanitized

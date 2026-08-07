@@ -16,17 +16,13 @@
 # 6. bare repo 检测:cwd 顶层含 HEAD/objects/refs(无 .git/HEAD)时,任何 git 命令 -> block
 #    (跑 git 触发 cwd hooks = RCE)。对标 isCurrentDirectoryBareGitRepo(git.ts:876-925)。
 #
-# ask 入口:同步 confirmer(可注入)。默认 input() + 非 tty fail-closed 拒绝
+# ask 入口:async confirmer(可注入,默认 cli_confirmer)。默认 input() + 非 tty fail-closed 拒绝
 # (对标 AskUserQuestionTool 的 stdin 简化路径;一次性 agentloop/CI 不跑写 git 命令)。
-# 不走 needs_approval + waiting_approval:该路径续跑留 TODO(见 agentloop.py:149),
-# 会卡住 REPL;P1 接好续跑后再升级。
+# 权限判定(bare repo + 分类 + ASK 走人)已移到 ToolExecutor.can_use_tool(execute_many 层,
+# 对标 CC canUseTool);本文件保留纯函数供它复用 + 单测。见 hitl-approval-design.md §4.2。
 import os
 import re
 import shlex
-import sys
-from typing import Callable, Optional
-
-from .guardrail import Guardrail, GuardrailResult
 
 # ---- 数据结构 ----
 
@@ -135,77 +131,3 @@ def classify_git_command(command: str) -> str:
     if sub in GIT_READ_ONLY_SUBCOMMANDS:
         return GitDecision.ALLOW
     return GitDecision.ASK
-
-
-# ---- ask 入口(同步确认,可注入)----
-
-def _default_confirmer(command: str) -> bool:
-    """默认确认:REPL 用 input();非 tty(一次性 agentloop / CI)fail-closed 拒绝。
-
-    fail-closed 对标 CC 非交互不跑写 git 命令:无法询问就拒绝,绝不静默执行。
-    """
-    if not sys.stdin.isatty():
-        return False
-    try:
-        ans = input(f"\n[git 写命令需确认] {command}\n允许执行? (y/N): ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        return False
-    return ans in ("y", "yes")
-
-
-# ---- Guardrail(before_tool)----
-
-class GitSafetyGuard(Guardrail):
-    """before_tool:BashTool 内 git 命令的白名单门禁。
-
-    只对 tool_name=="bash" 生效;非 git 的 bash 命令放行(交后续 guardrail / 执行)。
-    - ALLOW / NOT_GIT -> allow
-    - BLOCK(config 注入 flag)-> block(硬拦,不询问)
-    - ASK(写命令 / 复合)-> 同步 confirmer;通过 allow,否则 block
-    """
-    mount = "before_tool"
-    name = "git_safety"
-
-    def __init__(self, confirmer: Optional[Callable[[str], bool]] = None):
-        # None -> 用模块默认 stdin 确认;测试 / 非 REPL 可注入 mock 或 fail-closed 闭包。
-        self._confirmer = confirmer
-
-    def check(self, payload, context) -> GuardrailResult:
-        call = payload
-        if call.tool_name != "bash":
-            return GuardrailResult(passed=True, action="allow")
-        command = (call.arguments or {}).get("command") or ""
-        decision = classify_git_command(command)
-
-        if decision == GitDecision.NOT_GIT:
-            return GuardrailResult(passed=True, action="allow")
-
-        # 是 git 命令:先查 bare repo(RCE via hooks),早于子命令判定,对标 CC
-        # hasGitCommand && isCurrentDirectoryBareGitRepo()。getcwd 异常时 fail-open。
-        try:
-            cwd = os.getcwd()
-        except OSError:
-            cwd = None
-        if cwd is not None and _is_bare_repo(cwd):
-            return GuardrailResult(
-                passed=False, action="block",
-                reason="当前目录是 bare git repo(顶层含 HEAD/objects/refs,无 .git/HEAD),"
-                       "跑 git 会触发其 hooks(RCE),已硬拦",
-            )
-
-        if decision == GitDecision.ALLOW:
-            return GuardrailResult(passed=True, action="allow")
-        if decision == GitDecision.BLOCK:
-            return GuardrailResult(
-                passed=False, action="block",
-                reason="git 命令含 config 注入 flag(-c/--exec-path/--config-env)或 --output,"
-                       "已硬拦(防 RCE / 任意文件写)",
-            )
-        # ASK:同步确认
-        confirmer = self._confirmer or _default_confirmer
-        if confirmer(command):
-            return GuardrailResult(passed=True, action="allow")
-        return GuardrailResult(
-            passed=False, action="block",
-            reason=f"git 写命令未获用户确认,已拒绝:{command}",
-        )

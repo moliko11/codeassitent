@@ -1,8 +1,10 @@
 """AskUserQuestion 工具:多选问用户收集信息/澄清(对标 CC AskUserQuestion)。
 
-- REPL 模式用 input() 阻塞(简化;CC 用 React UI)。agent 模式(非 REPL)应转 waiting_approval
-  (阶段8 HITL,状态机已埋点),暂简化为 input。
-- 不要用来问"plan 行不行"(那是 ExitPlanMode,对标 CC prompt)。
+- REPL 用 input()(CC 用 React UI + updatedInput 收集答案当入参;我们简化为 input 直接
+  拿答案当 tool result 回灌,语义对齐 tool_result,见 docs/topics/hitl-approval-design.md §1)。
+- web 端若要复用:把 input() 换成 async confirmer 同款 future 模式(推前端+await 回传),
+  答案仍作 tool result 回灌。本工具不进 can_use_tool(它不是"批准"是"采集")。
+- 不要用来问 plan 行不行(那是 ExitPlanMode)。
 - multiSelect 支持多选(逗号分隔);回车默认第一项。
 """
 from ..registry import tool

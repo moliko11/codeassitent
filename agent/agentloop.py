@@ -163,15 +163,9 @@ async def _run_steps(state: AgentState, context: RuntimeContext, persister, subt
                 # 异步跑子 agent 用其结果替换 tool result(对标 NeedsApproval 的拦截模式)
                 if r.ok and isinstance(r.data, dict) and r.data.get("__subagent__"):
                     r = await _run_subagent(r, context, persister)
-                # 阶段8/9 HITL:needs_approval(高风险)转 waiting_approval(暂停,续跑留 TODO)
-                # needs_approval 通过 ToolEnd(error_type=NeedsApproval)进 trace,Tracer 自动捕获
-                if r.error and r.error.get("type") == "NeedsApproval":
-                    state.transition("waiting_approval")
-                    state.meta["pending_approval_call"] = next(
-                        (c for c in model_response.tool_calls if c.call_id == r.call_id), None)
-                    step.finish()
-                    sink.emit(StepEnd(step_index=step.index))
-                    return state
+                # HITL(阶段0 Phase A):权限拒绝在 execute_many 内已回填 GuardrailBlocked ToolResult,
+                # 走正常 tool_result 回灌(模型下轮看到"未获确认"换方法)。waiting_approval 态留给
+                # Phase B 持久化挂起(mobile/云,resume 续跑)。
                 if persister:
                     persister.log_tool_result(r)
                 state.messages = context.model_adapter.append_tool_result(state.messages, r)
@@ -665,6 +659,7 @@ def main():
     # config.model 直接发给 API,provider 的 model 形同虚设。
     config = build_agent_config({"model": pc.model})
     # 阶段8: GuardrailRunner + 默认 Guard(guardrails.yaml 控制启用清单;未知 guard 名 fail-fast)
+    # 阶段0(Phase A):权限判定在 ToolExecutor.can_use_tool(默认 cli_confirmer),不注册为 guard。
     guardrail_runner = build_guardrail_runner()
     # 可靠性四件套 + 执行参数(reliability.yaml;audit disabled -> audit_logger=None)。
     tool_executor = ToolExecutor(

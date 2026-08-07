@@ -1,9 +1,9 @@
-"""阶段 8 安全/Guardrails 验收测试。
+"""阶段 8 安全/Guardrails 验收测试(阶段0 Phase A 起:权限判定移到 can_use_tool)。
 
-覆盖 stage8-plan §9 验收:
+覆盖 stage8-plan §9 验收(阶段0 更新版):
 - PromptInjectionGuard(on_input 拦截注入)
-- PermissionGuard(before_tool 未授权工具拦截)
-- HighRiskGuard(before_tool 高风险触发 ApprovalRequired)
+- 权限(阶段0 起在 async can_use_tool):whitelist 拦截未授权工具 / 高风险走 confirmer
+  (原 PermissionGuard/HighRiskGuard 已删,逻辑并入 executor 层,见 test_confirmer.py)
 - PIIGuard(on_output PII 脱敏)
 - IndirectInjectionGuard(after_tool 工具结果诱导拦截)
 - Workspace(allows 路径权限,../ 逃逸拦截)
@@ -17,15 +17,15 @@ import asyncio
 import pytest
 from pathlib import Path
 
-from agent.guardrails import (GuardrailRunner, PromptInjectionGuard, PermissionGuard,
-    HighRiskGuard, PIIGuard, IndirectInjectionGuard, ToolResultPIIGuard)
+from agent.guardrails import (GuardrailRunner, PromptInjectionGuard,
+    PIIGuard, IndirectInjectionGuard, ToolResultPIIGuard)
 from agent.tools.defs import ToolCall, ToolResult, ToolSpec, Tool
 from agent.tools.registry import ToolRegistry, ToolExecutor
 from agent.core.workspace import Workspace
-from agent.core.errors import ApprovalRequired
 from agent.core.messages import Message
 from agent.core.models import ModelResponse
 from agent.adapters.base import BaseModelAdapter
+from agent.guardrails.confirmer import ApprovalRequest, ApprovalDecision
 
 
 # ─────────────────── 输入层:PromptInjectionGuard ───────────────────
@@ -39,44 +39,46 @@ def test_prompt_injection_block():
     assert r.run("on_input", "正常问题:今天天气如何", None).action == "allow"
 
 
-# ─────────────────── 工具层:PermissionGuard / HighRiskGuard ───────────────────
+# ─────────────────── 工具层:权限判定(阶段0 起在 async can_use_tool)───────────────────
 
 class _Cfg:
     def __init__(self, allowed=None):
         self.allowed_tools = allowed or []
 
-class _Ctx:
-    def __init__(self, config=None, registry=None):
-        self.config = config
-        self.registry = registry
+
+def test_can_use_tool_whitelist_blocks():
+    """can_use_tool:工具不在 allowed_tools 白名单 -> denied;在白名单 -> allowed。"""
+    import agent.tools  # 触发全量注册(getnowtime)
+    exe = ToolExecutor(agent.tools.registry, config=_Cfg(allowed=["getnowtime"]))
+    d = asyncio.run(exe.can_use_tool(ToolCall(call_id="c1", tool_name="other", arguments={})))
+    assert d.allowed is False
+    assert "allowed_tools" in d.reason
+    d_ok = asyncio.run(exe.can_use_tool(ToolCall(call_id="c2", tool_name="getnowtime", arguments={})))
+    assert d_ok.allowed is True
 
 
-def test_permission_guard_block():
-    """before_tool:工具不在 allowed_tools 白名单 -> block;在白名单 -> allow。"""
-    r = GuardrailRunner()
-    r.register(PermissionGuard())
-    ctx = _Ctx(config=_Cfg(allowed=["getnowtime"]))
-    assert r.run("before_tool", ToolCall(call_id="c1", tool_name="other", arguments={}), ctx).action == "block"
-    assert r.run("before_tool", ToolCall(call_id="c2", tool_name="getnowtime", arguments={}), ctx).action == "allow"
-    # 空白名单 = 全允许
-    ctx_empty = _Ctx(config=_Cfg(allowed=[]))
-    assert r.run("before_tool", ToolCall(call_id="c3", tool_name="any", arguments={}), ctx_empty).action == "allow"
+def test_can_use_tool_empty_whitelist_allows():
+    """空白名单 = 全允许(不误伤普通工具)。"""
+    import agent.tools
+    exe = ToolExecutor(agent.tools.registry, config=_Cfg(allowed=[]))
+    d = asyncio.run(exe.can_use_tool(ToolCall(call_id="c3", tool_name="read", arguments={"file_path": "x"})))
+    assert d.allowed is True
 
 
-def test_high_risk_approval():
-    """before_tool:高风险工具(high_risk=True)-> execute 抛 ApprovalRequired。"""
+def test_can_use_tool_high_risk_needs_confirmer():
+    """can_use_tool:高风险工具(high_risk=True)+ mock confirmer deny -> denied(拒绝回填原因)。"""
     reg = ToolRegistry()
     reg.register(Tool(
         tool_spec=ToolSpec(name="danger", description="d",
                            input_schema={"type": "object", "properties": {}}, high_risk=True),
         handler=lambda: "ok",
     ))
-    r = GuardrailRunner()
-    r.register(HighRiskGuard())
-    exe = ToolExecutor(reg, guardrail_runner=r, config=None)
-    r_result = exe.execute(ToolCall(call_id="x", tool_name="danger", arguments={}))
-    assert r_result.ok is False
-    assert r_result.error["type"] == "NeedsApproval"
+    async def deny(req):
+        return ApprovalDecision(allow=False, reason="用户拒绝")
+    exe = ToolExecutor(reg, confirmer=deny)
+    d = asyncio.run(exe.can_use_tool(ToolCall(call_id="x", tool_name="danger", arguments={})))
+    assert d.allowed is False
+    assert "用户拒绝" in d.reason
 
 
 # ─────────────────── 输出层:PIIGuard / IndirectInjectionGuard ───────────────────

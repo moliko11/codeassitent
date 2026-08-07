@@ -194,19 +194,21 @@ def test_guardrail_in_trace():
 
 
 def test_hitl_in_trace():
-    """端到端:高风险工具 -> waiting_approval + Tracer 捕获 tool span(error_type=NeedsApproval)。"""
+    """端到端:高风险工具 + mock confirmer deny -> GuardrailBlocked 回填模型,
+    Tracer 捕获 tool span(error_type=GuardrailBlocked)。(阶段0:异步 can_use_tool 取代
+    HighRiskGuard/needs_approval,waiting_approval 划给阶段11 异步工具。)"""
     from agent.agentloop import agentloop
     from agent.runtime import RuntimeContext
     from agent.config.config import AgentConfig
     from agent.core.state import AgentState
     from agent.tools.registry import ToolRegistry, ToolExecutor
     from agent.tools.defs import Tool, ToolSpec
-    from agent.guardrails import GuardrailRunner, HighRiskGuard
+    from agent.guardrails.confirmer import ApprovalDecision
     from agent.streaming.sink import CompositeSink, NullSink
 
+    async def deny(req):
+        return ApprovalDecision(allow=False, reason="mock 拒绝")
     tracer = Tracer("test-hitl")
-    runner = GuardrailRunner()
-    runner.register(HighRiskGuard())
     reg = ToolRegistry()
     reg.register(Tool(
         tool_spec=ToolSpec(name="danger", description="d",
@@ -215,17 +217,17 @@ def test_hitl_in_trace():
     ))
     ctx = RuntimeContext(
         registry=reg,
-        tool_executor=ToolExecutor(reg, guardrail_runner=runner, config=None),
+        tool_executor=ToolExecutor(reg, config=None, confirmer=deny),
         model_adapter=_MockAdapter(tool_rounds=1, tool_name="danger"),
         config=AgentConfig(max_steps=5),
         state=AgentState(),
         sink=CompositeSink(NullSink(), tracer),
     )
     state = asyncio.run(agentloop("do danger", ctx))
-    assert state.status == "waiting_approval"
+    assert state.status == "completed"   # deny 不挂起,回填 GuardrailBlocked 后模型收尾
     tool_spans = [s for s in tracer.trace.spans if s.type == "tool"]
     assert len(tool_spans) == 1
-    assert tool_spans[0].attrs.get("error_type") == "NeedsApproval"
+    assert tool_spans[0].attrs.get("error_type") == "GuardrailBlocked"
 
 
 # ─────────────────── P2 回归 ───────────────────

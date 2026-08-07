@@ -9,9 +9,9 @@
 #   GET  /sessions            list_runs() 喂 sidebar
 #   GET  /sessions/:id        read_run_report() 单 run 指标
 #
-# HITL 待办:GitSafetyGuard 当前用同步 input()(git_safety.py:142),server 模式非 tty ->
-# fail-closed 拒绝 git 写命令(只读 git 放行)。web 端先接受此行为(前端展示 ToolEnd error)。
-# 正式 HITL 见 hitl-approval-design.md Phase A(async confirmer + can_use_tool),本期不做。
+# HITL(阶段0 Phase A):async confirmer + can_use_tool 已落地(hitl-approval-design.md §4)。
+# 本 server 注入 web_confirmer(推前端弹窗 + await future),POST /approve/{id} 解 future。
+# 覆盖:git 写命令(ASK)+ 高风险工具(high_risk=True)。非 tty fail-closed 的兜底在 confirmer。
 import asyncio
 import json
 import os
@@ -48,6 +48,9 @@ from agent.agentloop import _run_turn, _emit_run_end, _write_run_meta
 from agent.persist.replay import resume
 from agent.prompts import build_system_prompt
 from agent.core.messages import Message
+from agent.guardrails.confirmer import (
+    ApprovalDecision, web_confirmer, set_active_sse_queue, resolve_web_approval,
+)
 
 from .session_manager import SessionManager, SessionState
 
@@ -71,6 +74,7 @@ _tool_executor = ToolExecutor(
     before_mutation=None,            # web 暂不接 file_history 版本链条(桌面端 diff 视图才需要,TODO)
     guardrail_runner=_guardrail_runner,
     config=_config,
+    confirmer=web_confirmer,         # 阶段0(Phase A):HITL 走 web_confirmer(推前端弹窗+await future)
     **build_tool_executor_params(),
 )
 # 工具超时/截断参数(tools.yaml)
@@ -153,6 +157,20 @@ class TurnBody(BaseModel):
     input: str
 
 
+class ApproveBody(BaseModel):
+    allow: bool = False
+    reason: str = ""
+
+
+@app.post("/approve/{request_id}")
+async def approve(request_id: str, body: ApproveBody):
+    """HITL(阶段0 Phase A):前端弹窗用户点完,POST 回来解 future,让 web_confirmer 的 await 继续。
+    allow=True 放行工具执行;False 回填 GuardrailBlocked(模型换方法)。"""
+    decision = ApprovalDecision(allow=body.allow, reason=body.reason)
+    resolve_web_approval(request_id, decision)
+    return {"ok": True}
+
+
 @app.post("/sessions")
 async def create_session():
     """创建 chat session(= 新 run_id + 共享 messages + Persister append 模式)。"""
@@ -175,6 +193,9 @@ async def turn(run_id: str, body: TurnBody):
         raise HTTPException(status_code=404, detail="session not found")
 
     q: asyncio.Queue = asyncio.Queue()
+    # HITL(阶段0):把本 turn 的 SSE 队列写进 ContextVar,web_confirmer 推 approval_request 事件到
+    # 前端弹窗。set 在 create_task 前 -> run_and_signal 子任务继承(多 session 并发互不串)。
+    set_active_sse_queue(q)
     sse_sink = SSESink(q)
     sink = CompositeSink(sse_sink, sess.tracer)   # 事件同时进 SSE 队列 + tracer(零侵入,同 agentloop L493)
 

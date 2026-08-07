@@ -9,7 +9,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { ChatMessage, SessionSummary } from "@/lib/types";
+import type { ApprovalRequest, ChatMessage, SessionSummary } from "@/lib/types";
 import type { StreamEvent } from "@/lib/events";
 import { applyEvent } from "@/lib/events";
 import { readSSE } from "@/lib/sseStream";
@@ -38,6 +38,8 @@ interface ChatContextValue {
   stopStreaming: () => void;
   newChat: () => void;
   selectSession: (id: string) => void;
+  pendingApproval: ApprovalRequest | null;
+  resolveApproval: (requestId: string, allow: boolean, reason?: string) => void;
 }
 
 const ChatContext = createContext<ChatContextValue | null>(null);
@@ -50,12 +52,16 @@ function toSidebarSession(r: SessionSummary): SidebarSession {
   };
 }
 
+const APPROVAL_TIMEOUT_MS = 60_000; // 弹窗无响应自动拒绝(plan §0.7 临时方案:SSE 断连防永久挂起)
+
 export function ChatProvider({ children }: { children: ReactNode }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [sessions, setSessions] = useState<SidebarSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [pendingApproval, setPendingApproval] = useState<ApprovalRequest | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const approvalTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refreshSessions = useCallback(async () => {
     try {
@@ -79,6 +85,41 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       prev.map((m) => (m.streaming ? { ...m, streaming: false, status: "failed" as const } : m)),
     );
   }, []);
+
+  // 用户点弹窗的 Allow/Deny -> POST /approve/{id} 解后端 future(或超时自动拒绝)
+  const resolveApproval = useCallback(
+    async (requestId: string, allow: boolean, reason?: string) => {
+      if (approvalTimerRef.current) {
+        clearTimeout(approvalTimerRef.current);
+        approvalTimerRef.current = null;
+      }
+      setPendingApproval(null);
+      try {
+        await fetch(`/api/approve/${requestId}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ allow, reason: reason || "" }),
+        });
+      } catch {
+        /* 后端未起/网络断:静默,SSE 断开会让工具在服务端超时自动拒绝 */
+      }
+    },
+    [],
+  );
+
+  const queueApproval = useCallback(
+    (req: ApprovalRequest) => {
+      setPendingApproval(req);
+      // 60s 无响应自动拒绝(front-end timeout,plan §0.7;后端还有 300s 兜底)
+      if (approvalTimerRef.current) clearTimeout(approvalTimerRef.current);
+      approvalTimerRef.current = setTimeout(() => {
+        approvalTimerRef.current = null;
+        setPendingApproval(null);
+        void resolveApproval(req.requestId, false, "审批超时,自动拒绝");
+      }, APPROVAL_TIMEOUT_MS);
+    },
+    [resolveApproval],
+  );
 
   const sendMessage = useCallback(
     async (content: string) => {
@@ -150,6 +191,16 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         if (!res.ok) throw new Error(await res.text());
         for await (const ev of readSSE(res)) {
           const typed = ev as unknown as StreamEvent;
+          // HITL(阶段0):需人工批准 -> 弹窗(不进消息体);点 Allow/Deny 后 POST /approve 解 future
+          if (typed.type === "ApprovalRequestEvent") {
+            queueApproval({
+              requestId: typed.request_id,
+              toolName: typed.tool_name,
+              reason: typed.reason,
+              arguments: typed.arguments,
+            });
+            continue;
+          }
           setMessages((prev) =>
             prev.map((m) => (m.id === assistantId ? applyEvent(m, typed) : m)),
           );
@@ -171,7 +222,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         refreshSessions(); // 刷新 sidebar(新 run_meta)
       }
     },
-    [isStreaming, activeSessionId, refreshSessions],
+    [isStreaming, activeSessionId, refreshSessions, queueApproval],
   );
 
   const newChat = useCallback(() => {
@@ -199,7 +250,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
   return (
     <ChatContext.Provider
-      value={{ messages, isStreaming, sessions, activeSessionId, sendMessage, stopStreaming, newChat, selectSession }}
+      value={{ messages, isStreaming, sessions, activeSessionId, sendMessage, stopStreaming, newChat, selectSession, pendingApproval, resolveApproval }}
     >
       {children}
     </ChatContext.Provider>

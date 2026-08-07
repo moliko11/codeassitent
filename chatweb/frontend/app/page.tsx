@@ -6,6 +6,7 @@ import Sidebar from "@/components/Sidebar";
 import ChatHeader from "@/components/ChatHeader";
 import MessageList from "@/components/MessageList";
 import Composer from "@/components/Composer";
+import ApprovalDialog from "@/components/ApprovalDialog";
 
 function ChatShell() {
   const { messages, sendMessage, sessions, activeSessionId } = useChat();
@@ -34,6 +35,7 @@ function ChatShell() {
         <MessageList onPickSuggestion={handleSend} />
         <Composer />
       </main>
+      <ApprovalDialog />
     </div>
   );
 }

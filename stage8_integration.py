@@ -1,8 +1,9 @@
 """阶段8 真实 LLM 联调:验证 Guardrail 接入不破坏正常流程 + PII 脱敏生效。
 
-用 DeepSeek + guardrail_runner(默认 5 个 Guard)。验证点:
+用 DeepSeek + guardrail_runner(阶段0 起 before_tool 权限三 guard 已移到 can_use_tool,
+联调只剩 on_input/on_output/after_tool 四 guard)。验证点:
   1. 正常输入通过 PromptInjectionGuard(不拦)
-  2. 工具调用通过 before_tool(不拦)
+  2. 工具调用通过 async can_use_tool(不拦)
   3. 最终回答过 PIIGuard:on_output 脱敏手机号 13812345678 -> 138****5678
 
 运行(从 code/ 目录,3.12 venv):
@@ -17,8 +18,8 @@ from agent.agentloop import agentloop, _track_edit_callback
 from agent.runtime import RuntimeContext
 from agent.core.state import AgentState
 from agent.streaming.printer import StreamingPrinter
-from agent.guardrails import (GuardrailRunner, PromptInjectionGuard, PermissionGuard,
-    HighRiskGuard, PIIGuard, IndirectInjectionGuard)
+from agent.guardrails import (GuardrailRunner, PromptInjectionGuard,
+    PIIGuard, IndirectInjectionGuard)
 
 import agent.tools  # 触发默认工具注册
 from agent.tools import registry as default_registry
@@ -41,7 +42,6 @@ def main():
     config = AgentConfig(model=pc.model, max_steps=5)
     guardrail_runner = GuardrailRunner()
     guardrail_runner.register(PromptInjectionGuard()) \
-        .register(PermissionGuard()).register(HighRiskGuard()) \
         .register(PIIGuard()).register(IndirectInjectionGuard())
     tool_executor = ToolExecutor(registry, before_mutation=_track_edit_callback,
                                   guardrail_runner=guardrail_runner, config=config)

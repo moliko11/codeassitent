@@ -32,6 +32,14 @@ export interface ChatMessage {
   createdAt: number;
 }
 
+// HITL 批准请求(后端 ApprovalRequestEvent 对齐)
+export interface ApprovalRequest {
+  requestId: string;
+  toolName: string;
+  reason: string;
+  arguments: Record<string, unknown>;
+}
+
 // list_runs() 返回的 run_meta 摘要(对齐 _write_run_meta 字段)
 export interface SessionSummary {
   run_id: string;

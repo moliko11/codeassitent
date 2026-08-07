@@ -1,6 +1,5 @@
-# guardrails 包:安全护栏(阶段8)
+# guardrails 包:安全护栏(阶段8;权限判定阶段0 移到 can_use_tool)
 from .guardrail import Guardrail, GuardrailResult, GuardrailRunner
 from .prompt_injection import PromptInjectionGuard
-from .permission import PermissionGuard, HighRiskGuard
-from .git_safety import GitSafetyGuard, classify_git_command, GitDecision
+from .git_safety import classify_git_command, GitDecision
 from .pii import PIIGuard, IndirectInjectionGuard, ToolResultPIIGuard

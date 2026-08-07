@@ -189,12 +189,12 @@ def test_build_multiagent_params(tmp_path):
 # ─────────────────── guardrails.yaml ───────────────────
 
 def test_guardrail_names_default_and_factory(tmp_path):
-    """缺省 7 个 guard;build_guardrail_runner 装配成功;未知名 raise。"""
+    """缺省 4 个 guard(阶段0 起权限三 guard 移到 can_use_tool);
+    build_guardrail_runner 装配成功;未知名 raise。"""
     assert load_guardrail_names() == [
-        "prompt_injection", "permission", "high_risk", "git_safety",
-        "pii", "indirect_injection", "pii_tool_result",
+        "prompt_injection", "pii", "indirect_injection", "pii_tool_result",
     ]
-    assert _count_guards(build_guardrail_runner()) == 7
+    assert _count_guards(build_guardrail_runner()) == 4
     _write(tmp_path, "guardrails", {"enabled": ["prompt_injection", "pii"]})
     assert _count_guards(build_guardrail_runner()) == 2
     _write(tmp_path, "guardrails", {"enabled": ["bogus_guard"]})
