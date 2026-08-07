@@ -186,12 +186,22 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           const typed = ev as unknown as StreamEvent;
           // HITL(阶段0):需人工批准 -> 弹窗(不进消息体);点 Allow/Deny 后 POST /approve 解 future
           if (typed.type === "ApprovalRequestEvent") {
-            queueApproval({
+            const req: ApprovalRequest = {
               requestId: typed.request_id,
               toolName: typed.tool_name,
               reason: typed.reason,
               arguments: typed.arguments,
-            });
+            };
+            // Phase 2 §2.6:桌面端走原生系统弹窗(主进程 dialog.showMessageBox,同步等结果),
+            // web 浏览器走内嵌 modal。两种情况最终都 resolveApproval -> POST /approve 解后端 future。
+            if (window.electronAPI?.askApproval) {
+              void window.electronAPI
+                .askApproval(req)
+                .then((d) => resolveApproval(req.requestId, d.allow, d.reason))
+                .catch(() => resolveApproval(req.requestId, false, "原生弹窗异常,自动拒绝"));
+            } else {
+              queueApproval(req);
+            }
             continue;
           }
           setMessages((prev) =>
@@ -215,7 +225,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         refreshSessions(); // 刷新 sidebar(新 run_meta)
       }
     },
-    [isStreaming, activeSessionId, refreshSessions, queueApproval],
+    [isStreaming, activeSessionId, refreshSessions, queueApproval, resolveApproval],
   );
 
   const newChat = useCallback(() => {
