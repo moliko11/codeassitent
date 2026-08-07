@@ -37,14 +37,14 @@ from agent.streaming.sse_sink import SSESink
 from agent.streaming.events import RunStart, RunEnd, StreamEvent
 from agent.tracing import Tracer, TraceStore
 from agent.tracing.metrics import MetricsCollector
-from agent.persist.paths import memory_dir, PERSIST_ROOT
+from agent.persist.paths import memory_dir, PERSIST_ROOT, run_dir
 from agent.persist.store import list_runs, read_run_report, read_transcript, set_run_title
 from agent.persist.persister import Persister
 from agent.memory import MemoryStore
 from agent.tools.memory_tool import make_save_memory_tool
 from agent.tools.task_tool import make_task_tool
 from agent.tools import _runtime_state
-from agent.agentloop import _run_turn, _emit_run_end, _write_run_meta, _first_user_title
+from agent.agentloop import _run_turn, _emit_run_end, _write_run_meta, _first_user_title, _track_edit_callback
 from agent.persist.replay import resume
 from agent.prompts import build_system_prompt
 from agent.core.messages import Message
@@ -52,7 +52,8 @@ from agent.guardrails.confirmer import (
     ApprovalDecision, web_confirmer, set_active_sse_queue, resolve_web_approval,
 )
 
-from .session_manager import SessionManager, SessionState
+from .session_manager import SessionManager, SessionState, make_file_history
+from .file_history_api import router as file_history_router
 
 
 # ─────────────────── 装配(模块级共享件,对齐 main() agentloop.py:618)───────────────────
@@ -71,7 +72,7 @@ _guardrail_runner = build_guardrail_runner()
 from agent.tools.registry import ToolExecutor
 _tool_executor = ToolExecutor(
     _registry,
-    before_mutation=None,            # web 暂不接 file_history 版本链条(桌面端 diff 视图才需要,TODO)
+    before_mutation=_track_edit_callback,   # Phase 2 §2.5:Edit/Write 写盘前备份(file_history 版本链条)
     guardrail_runner=_guardrail_runner,
     config=_config,
     confirmer=web_confirmer,         # 阶段0(Phase A):HITL 走 web_confirmer(推前端弹窗+await future)
@@ -113,6 +114,7 @@ def ensure_session(run_id: str) -> SessionState | None:
         persister= Persister(run_id),
         tracer=Tracer(run_id, store=TraceStore(run_id)),
         title=_first_user_title(state.messages),   # Phase 1 §1.1:重建时从历史首条 user 推导
+        file_history=make_file_history(run_id),    # Phase 2 §2.5:重建 FileHistory(含 sidecar 恢复)
     )
     session_manager._sessions[run_id] = sess  # 缓存,warm path 下次直接命中
     return sess
@@ -148,10 +150,11 @@ def _event_to_dict(ev: StreamEvent) -> dict:
 app = FastAPI(title="ez-interview agent web")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],        # BFF 模式同源免 CORS;这里放开方便前端直连测试
+    allow_origins=["*"],        # 静态导出后前端跨源直连(CORS 全开);web/桌面同用
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(file_history_router)   # Phase 2 §2.5:桌面 diff 视图(/sessions/{id}/files*)
 
 
 class TurnBody(BaseModel):
@@ -225,7 +228,9 @@ async def turn(run_id: str, body: TurnBody):
 
     # _runtime_state 注入(对齐 agentloop L496-498:_runtime_state 给 _run_steps 内的工具用)
     _runtime_state.model_adapter.set(_adapter)     # WebFetch 用
-    _runtime_state.workspace.set(_workspace)       # 路径权限校验用(file_history 暂不接,None=跳过 snapshot)
+    _runtime_state.workspace.set(_workspace)       # 路径权限校验用
+    _runtime_state.file_history.set(sess.file_history)   # Phase 2 §2.5:每轮必设(防 ContextVar 跨 session 泄漏),
+                                                        # _run_steps 每步末 make_snapshot + before_mutation 自动生效
 
     async def run_and_signal():
         """跑 _run_turn,完成后发 RunEnd(对齐 REPL _do_turn 调 _emit_run_end)。"""

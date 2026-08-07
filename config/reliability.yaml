@@ -11,7 +11,7 @@ execution:                    # ToolExecutor 装配参数(registry.py)
   retry_mode: runtime_retry   # 主入口装配默认(库级 ToolExecutor 默认仍 llm_retry)
   parallel_semaphore: 8       # _parallel asyncio.Semaphore
   max_workers: 1              # _run_with_timeout ThreadPoolExecutor
-  result_summary_chars: 80    # _result_summary 截断
+  result_summary_chars: 4000  # _result_summary 截断(Phase 2 §2.4:桌面 xterm 渲染 Bash 输出,80 太少)
 audit:                        # AuditLogger
   enabled: true
   log_path: ""                # 空 -> code 回落 audit_path()(persist/audit.jsonl)

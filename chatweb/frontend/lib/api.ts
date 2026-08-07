@@ -36,3 +36,17 @@ export const apiRename = (sessionId: string, title: string) =>
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ title }),
   });
+
+// ── Phase 2 §2.5:桌面 diff 视图(文件版本链 + 内容)──
+
+/** 该 run 编辑过的文件列表(喂 diff 面板左列)。 */
+export const apiFiles = (runId: string) =>
+  fetch(`${AGENT_API}/sessions/${runId}/files`);
+
+/** 单文件版本链(key = sha256(abs_path)[:16],后端生成)。 */
+export const apiFileVersions = (runId: string, key: string) =>
+  fetch(`${AGENT_API}/sessions/${runId}/files/${key}/versions`);
+
+/** 某版本内容:version 传 "current"(默认)读磁盘当前内容,传数字读该版本备份。 */
+export const apiFileContent = (runId: string, key: string, version: number | "current" = "current") =>
+  fetch(`${AGENT_API}/sessions/${runId}/files/${key}/content?version=${version}`);

@@ -15,6 +15,7 @@ import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable, Optional
 
 MAX_SNAPSHOTS = 100
 INITIAL_STEP_ID = -1   # 初始 snapshot 的 step_id,代表"第一改之前=原版状态"
@@ -50,6 +51,9 @@ class FileHistory:
     snapshots: list[Snapshot] = field(default_factory=list)
     tracked_files: set[str] = field(default_factory=set)
     seq: int = 0                       # 单调递增,不随驱逐回退(对标 CC snapshotSequence)
+    # Phase 2 §2.5:每步快照后的可选回调(web 端用它落 sidecar,让历史 run 也能看版本链)。
+    # CLI/REPL 不传 -> 行为完全不变。
+    on_snapshot: Optional[Callable[[Snapshot], None]] = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
         self.backup_root = Path(self.backup_root)
@@ -124,6 +128,8 @@ class FileHistory:
         if len(self.snapshots) > MAX_SNAPSHOTS:
             self.snapshots.pop(0)     # 丢最老(对标 :309-311)
         self.seq += 1
+        if self.on_snapshot:
+            self.on_snapshot(snap)    # Phase 2 §2.5:sidecar 持久化钩子(web 端注入)
         return snap
 
     def _origin_changed(self, abs_path: str, backup: FileBackup) -> bool:

@@ -4,6 +4,7 @@
 # 直接用会丢上下文。所以 web 不调 agentloop,改调 _run_turn(agentloop.py:274,单轮体不收尾),
 # 由 SessionManager 管 session 级状态:一个 chat session = 一个 run_id(共享 transcript,跨轮 append)。
 # 等价于把 REPL 的 _do_turn(agentloop.py:553)HTTP 化。见 chat-template-integration §3。
+import json
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -23,9 +24,50 @@ class SessionState:
     tracer: Tracer                # 会话级 tracer(跨轮累积 span,每轮末落 run_meta)
     created_at: float = field(default_factory=time.time)
     title: str = ""               # Phase 1 §1.1:会话标题(首轮自动推导,前端可重命名,覆写 run_meta)
+    file_history: Optional[object] = None   # Phase 2 §2.5:跨轮复用的 FileHistory(桌面 diff 数据源)
 
     def close(self):
         self.persister.close()
+
+
+def make_file_history(run_id: str):
+    """构建该 run 的 FileHistory(桌面 diff 视图数据源,Phase 2 §2.5)。
+
+    - 挂 on_snapshot 回调:每步快照 append 一行到 file-history-meta.jsonl sidecar。
+      FileHistory 元数据(snapshots/tracked_files)纯内存,sidecar 让历史 run 也能看版本链。
+    - 若 sidecar 已存在则全量重建(进程重启 / resume 旧 run 时版本连续)。
+    """
+    from agent.utils.fileHistory import FileHistory, Snapshot, FileBackup
+    from agent.persist.paths import run_dir
+
+    rdir = run_dir(run_id)
+    meta_p = rdir / "file-history-meta.jsonl"
+
+    def _writer(snap):
+        with open(meta_p, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "step_id": snap.step_id,
+                "ts": snap.timestamp,
+                "tracked": {fp: {"file": b.backup_file_name, "version": b.version, "time": b.backup_time}
+                            for fp, b in snap.tracked.items()},
+            }, ensure_ascii=False) + "\n")
+
+    fh = FileHistory(rdir / "file-history", on_snapshot=_writer)
+    if meta_p.exists():
+        snaps = []
+        for line in meta_p.read_text(encoding="utf-8").splitlines():
+            d = json.loads(line)
+            snaps.append(Snapshot(
+                d["step_id"],
+                {fp: FileBackup(v["file"], v["version"], v.get("time", 0.0))
+                 for fp, v in d["tracked"].items()},
+                d.get("ts", 0.0),
+            ))
+        if snaps:
+            fh.snapshots = snaps
+            fh.tracked_files = set().union(*(s.tracked for s in snaps))
+            fh.seq = len(snaps)
+    return fh
 
 
 class SessionManager:
@@ -41,6 +83,7 @@ class SessionManager:
             messages=[],
             persister=Persister(run_id),
             tracer=Tracer(run_id, store=TraceStore(run_id)),
+            file_history=make_file_history(run_id),   # Phase 2 §2.5:桌面 diff 数据源
         )
         self._sessions[run_id] = sess
         return sess

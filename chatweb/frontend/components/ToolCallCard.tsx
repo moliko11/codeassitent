@@ -1,8 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import dynamic from "next/dynamic";
 import { CheckCircle2, ChevronDown, ChevronUp, Loader2, ShieldAlert, XCircle } from "lucide-react";
 import type { ToolCallView } from "@/lib/types";
+import { apiFiles, apiFileContent } from "@/lib/api";
+import { languageFromPath } from "@/lib/fileLanguage";
+import { useChat } from "@/context/ChatContext";
+
+// Monaco/xterm 有浏览器副作用(monacoSetup 模块级装配 worker),动态 import 禁 SSR。
+const CodeEditor = dynamic(() => import("./CodeEditor"), { ssr: false });
+const TerminalView = dynamic(() => import("./TerminalView"), { ssr: false });
 
 const phaseMeta: Record<ToolCallView["phase"], { icon: typeof Loader2; cls: string; label: string }> = {
   producing: { icon: Loader2, cls: "text-[var(--muted-foreground)] animate-spin", label: "生成参数" },
@@ -25,6 +33,69 @@ function tryParse(s: string): object | undefined {
   try { return JSON.parse(s); } catch { return undefined; }
 }
 
+// ── Phase 2 §2.4:富展示(read→Monaco / edit·write→当前内容→Monaco / bash→xterm)──
+
+/** edit/write 的 summary 只是确认文案(Edited {path} (n replacements)),真实内容经 diff API 取磁盘当前。 */
+function EditFileViewer({
+  filePath,
+  summary,
+  runId,
+}: {
+  filePath?: string;
+  summary?: string;
+  runId: string | null;
+}) {
+  const [content, setContent] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setContent(null);
+    if (!runId || !filePath) {
+      setContent(summary || "");
+      return;
+    }
+    const base = filePath.split(/[\\/]/).pop();
+    apiFiles(runId)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((list: { key: string; name: string }[]) => {
+        if (cancelled) return;
+        const hit = list.find((f) => f.name === base);
+        if (!hit) {
+          setContent(summary || "");
+          return;
+        }
+        return apiFileContent(runId, hit.key, "current")
+          .then((r) => r.json())
+          .then((d: { exists: boolean; content: string }) => {
+            if (!cancelled) setContent(d.exists ? d.content : summary || "");
+          });
+      })
+      .catch(() => { if (!cancelled) setContent(summary || ""); });
+    return () => { cancelled = true; };
+  }, [filePath, summary, runId]);
+
+  if (content === null) {
+    return <div className="px-1 py-1 text-[11px] text-[var(--muted-foreground)]">加载文件内容…</div>;
+  }
+  if (!content.trim()) return null;
+  return <CodeEditor value={content} language={languageFromPath(filePath || "")} />;
+}
+
+function RichViewer({ tc }: { tc: ToolCallView }) {
+  const { activeSessionId } = useChat();
+  const filePath = (tc.arguments as { file_path?: string } | undefined)?.file_path;
+  if (tc.toolName === "bash") {
+    return <TerminalView text={tc.summary || ""} />;
+  }
+  if (tc.toolName === "read") {
+    // read 返回 cat -n 格式({行号}\t{内容}),剥行号后再进 Monaco
+    const clean = (tc.summary || "").replace(/^\d+\t/gm, "");
+    if (!clean.trim()) return null;
+    return <CodeEditor value={clean} language={languageFromPath(filePath || "")} />;
+  }
+  // edit / write
+  return <EditFileViewer filePath={filePath} summary={tc.summary} runId={activeSessionId} />;
+}
+
 /**
  * ToolCallCard - 工具调用卡片(对齐 chat-template-integration §7)。
  * 展示 phase 状态(产参/执行/完成)+ 参数 JSON + summary + 耗时 + 重试次数。
@@ -39,6 +110,10 @@ export default function ToolCallCard({ tc }: { tc: ToolCallView }) {
   // summary 太长 -> 折叠;展开逻辑(summary.length > 阈值)才给展开按钮
   const longSummary = !!tc.summary && tc.summary.length > SUMMARY_CLAMP_CHARS;
   const showClamped = !!tc.summary && longSummary && !expanded;
+  // Phase 2 §2.4:read/edit/write/bash 完成后用富视图(Monaco/xterm)替代纯文本 summary
+  const isRichTool =
+    tc.toolName === "read" || tc.toolName === "edit" || tc.toolName === "write" || tc.toolName === "bash";
+  const showRichViewer = tc.phase === "done" && isRichTool && !!tc.summary;
   return (
     <div className="my-1.5 rounded-lg border border-[var(--border)]/60 bg-[var(--card)]/60 px-3 py-2 text-[12.5px]">
       <div className="flex flex-wrap items-center gap-2">
@@ -71,29 +146,35 @@ export default function ToolCallCard({ tc }: { tc: ToolCallView }) {
 {JSON.stringify(args, null, 2)}
         </pre>
       )}
-      {tc.summary && (
+      {showRichViewer ? (
         <div className="mt-1">
-          <div className={`text-[var(--muted-foreground)] ${showClamped ? "line-clamp-3" : ""}`}>
-            {tc.summary}
-          </div>
-          {longSummary && (
-            <button
-              type="button"
-              onClick={() => setExpanded((v) => !v)}
-              className="mt-0.5 flex items-center gap-0.5 text-[11px] text-[var(--primary)] hover:underline"
-            >
-              {expanded ? (
-                <>
-                  <ChevronUp size={11} /> 收起
-                </>
-              ) : (
-                <>
-                  <ChevronDown size={11} /> 展开
-                </>
-              )}
-            </button>
-          )}
+          <RichViewer tc={tc} />
         </div>
+      ) : (
+        tc.summary && (
+          <div className="mt-1">
+            <div className={`text-[var(--muted-foreground)] ${showClamped ? "line-clamp-3" : ""}`}>
+              {tc.summary}
+            </div>
+            {longSummary && (
+              <button
+                type="button"
+                onClick={() => setExpanded((v) => !v)}
+                className="mt-0.5 flex items-center gap-0.5 text-[11px] text-[var(--primary)] hover:underline"
+              >
+                {expanded ? (
+                  <>
+                    <ChevronUp size={11} /> 收起
+                  </>
+                ) : (
+                  <>
+                    <ChevronDown size={11} /> 展开
+                  </>
+                )}
+              </button>
+            )}
+          </div>
+        )
       )}
     </div>
   );
