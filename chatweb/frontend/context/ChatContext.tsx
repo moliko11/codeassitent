@@ -14,12 +14,13 @@ import type { StreamEvent } from "@/lib/events";
 import { applyEvent } from "@/lib/events";
 import { readSSE } from "@/lib/sseStream";
 import { newId } from "@/lib/mockData";
+import { apiSessions, apiCreateSession, apiApprove, apiChat, apiMessages, apiRename } from "@/lib/api";
 
 /**
  * ChatContext - 真实后端版(替换模板的 mock provider)。
- * 接 code/agent FastAPI 后端(经 Next.js BFF):POST /api/chat 流式消费 SSE,
- * eventReducer 聚合 12 事件 -> ChatMessage。sessions 来自 list_runs()。
- * 见 chat-template-integration.md §5/§7。
+ * 接 code/agent FastAPI 后端(Phase 2 §2.2 起直连,静态导出后无 BFF 层):
+ * POST /sessions/:id/turn 流式消费 SSE,eventReducer 聚合 12 事件 -> ChatMessage。
+ * sessions 来自 list_runs()。见 chat-template-integration.md §5/§7。
  */
 
 // Sidebar 需要的形状(id/title/updatedAt);从后端 run_meta 转换
@@ -71,7 +72,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
   const refreshSessions = useCallback(async () => {
     try {
-      const r = await fetch("/api/sessions");
+      const r = await apiSessions();
       const data: SessionSummary[] = await r.json();
       setSessions(data.map(toSidebarSession));
     } catch {
@@ -101,11 +102,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       }
       setPendingApproval(null);
       try {
-        await fetch(`/api/approve/${requestId}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ allow, reason: reason || "" }),
-        });
+        await apiApprove(requestId, allow, reason || "");
       } catch {
         /* 后端未起/网络断:静默,SSE 断开会让工具在服务端超时自动拒绝 */
       }
@@ -150,11 +147,11 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       setMessages((prev) => [...prev, userMsg, assistantMsg]);
       setIsStreaming(true);
 
-      // 首次发消息:建 session(= 新 run_id)
-      let sid = activeSessionId;
+      // 首次发消息:建 session(= 新 run_id)。|| "" 让 sid 恒为 string(空串 falsy,照走 if 建号分支)。
+      let sid = activeSessionId || "";
       if (!sid) {
         try {
-          const r = await fetch("/api/sessions", { method: "POST" });
+          const r = await apiCreateSession();
           const { run_id } = await r.json();
           sid = run_id;
           setActiveSessionId(sid);
@@ -175,24 +172,14 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       const ctrl = new AbortController();
       abortRef.current = ctrl;
       try {
-        let res = await fetch("/api/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sessionId: sid, input: text }),
-          signal: ctrl.signal,
-        });
+        let res = await apiChat(sid, text, ctrl.signal);
         // session 丢失(后端重启后内存 session_manager 清空)-> 重建 session 重试一次
         if (!res.ok && res.status === 404) {
-          const r2 = await fetch("/api/sessions", { method: "POST" });
+          const r2 = await apiCreateSession();
           const j2 = await r2.json();
           sid = j2.run_id;
           setActiveSessionId(sid);
-          res = await fetch("/api/chat", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ sessionId: sid, input: text }),
-            signal: ctrl.signal,
-          });
+          res = await apiChat(sid, text, ctrl.signal);
         }
         if (!res.ok) throw new Error(await res.text());
         for await (const ev of readSSE(res)) {
@@ -243,7 +230,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       setActiveSessionId(id);
       // 恢复历史消息:读 transcript 转 ChatMessage(后端 /sessions/:id/messages)
       try {
-        const r = await fetch(`/api/sessions/${id}/messages`);
+        const r = await apiMessages(id);
         if (!r.ok) throw new Error(await r.text());
         const msgs = await r.json();
         setMessages(msgs);
@@ -261,11 +248,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       const next = title.trim();
       if (!next || !activeSessionId) return;
       try {
-        const r = await fetch(`/api/sessions/${activeSessionId}/rename`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ title: next }),
-        });
+        const r = await apiRename(activeSessionId, next);
         if (!r.ok) return;
       } catch {
         return; /* 后端未起:静默,只更新本地 */

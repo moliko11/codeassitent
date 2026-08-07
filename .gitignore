@@ -25,6 +25,13 @@ Thumbs.db
 agent/供应商.txt
 docs/
 
+# Electron 桌面端依赖（Phase 2）
+desktop/node_modules/
+
+# 前端静态导出产物（Phase 2,out/ 由 npm run build 生成）
+chatweb/frontend/out/
+chatweb/frontend/.next/
+
 # Agent 运行时持久化产物（transcript 等，不进版本库）
 persist/runs/
 persist/
