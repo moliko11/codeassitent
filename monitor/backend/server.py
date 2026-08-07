@@ -6,6 +6,7 @@
 #
 # 必须从 code/ 启动(PERSIST_ROOT 相对路径,坑6;与 REPL 同约束)。
 import json
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
@@ -313,4 +314,5 @@ def aggregate_tools() -> list[dict]:
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    # 8000 留给 chatweb 后端,monitor 默认 8002;被占可用 MONITOR_PORT 覆盖(对齐 chatweb 的 AGENT_PORT)。
+    uvicorn.run(app, host="127.0.0.1", port=int(os.environ.get("MONITOR_PORT", "8002")))

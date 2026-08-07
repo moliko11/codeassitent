@@ -25,7 +25,7 @@ async function fetchJson<T>(path: string): Promise<T> {
   try {
     res = await fetch(path);
   } catch {
-    throw new ApiError(0, "网络错误:无法连接后端(确认 :8000 已启动)");
+    throw new ApiError(0, "网络错误:无法连接后端(确认 :8002 已启动)");
   }
   if (!res.ok) {
     let msg = `${path} -> ${res.status}`;
@@ -50,7 +50,7 @@ async function fetchMutate<T>(path: string, method: "POST" | "DELETE", body?: un
       body: body != null ? JSON.stringify(body) : undefined,
     });
   } catch {
-    throw new ApiError(0, "网络错误:无法连接后端(确认 :8000 已启动)");
+    throw new ApiError(0, "网络错误:无法连接后端(确认 :8002 已启动)");
   }
   if (!res.ok) {
     let msg = `${path} -> ${res.status}`;

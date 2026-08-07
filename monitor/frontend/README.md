@@ -10,8 +10,9 @@ Vite + React 19 + TypeScript + Tailwind 3.4 + shadcn/ui + Recharts + @tanstack/r
 
 ```bash
 # 终端 1:后端(必须从 code/ 启动,PERSIST_ROOT 是相对路径)
+# 注意:8000 是 chatweb 后端,monitor 默认 8002(被占可 MONITOR_PORT 覆盖)
 cd code
-python -m monitor.backend.server          # http://127.0.0.1:8000
+python -m monitor.backend.server          # http://127.0.0.1:8002
 
 # 终端 2:前端
 cd code/monitor/frontend
@@ -21,17 +22,18 @@ npm run dev                                # http://localhost:5173
 # 浏览器开 http://localhost:5173
 ```
 
-前端经 Vite proxy 把 `/api/*` 代理到 `127.0.0.1:8000`(同源,免 CORS,见 `vite.config.ts`)。
+前端经 Vite proxy 把 `/api/*` 代理到 `127.0.0.1:8002`(同源,免 CORS,见 `vite.config.ts`)。
 
 ## 页面
 
 | 路由 | 内容 |
 |---|---|
-| `/` | Dashboard:KPI 卡 + token 趋势 + model 分布 + 命中率/成功率趋势 + 近期 runs |
+| `/` | Dashboard:KPI 卡 + token 趋势 + model 分布 + 命中率/成功率趋势 + 近期 runs(15s 轮询 + 手动刷新) |
 | `/runs` | 会话列表:全字段表格 + 排序 + status/model 筛选 |
-| `/runs/:id` | Run 详情(核心,5 Tab):火焰图 / 消息流 / 系统提示词 / Token 明细 / 上下文快照(预留) |
-| `/stats` | 统计:按 model/天/状态分布 + 工具分析(预留)+ 反馈 |
-| `/prompt` | 全局默认系统提示词分层 |
+| `/runs/:id` | Run 详情(核心,6 Tab):火焰图(交互)/ 子 Agent / 消息流 / 系统提示词 / Token 明细 / 上下文快照(预留) |
+| `/stats` | 统计:按 model/天/状态分布 + 工具分析(跳转 /tools)+ 反馈 |
+| `/tools` | 工具使用统计:调用分布饼图 + 明细表(成功率/平均耗时/重试/超时/错误分类) |
+| `/prompt` | 系统提示词:分层查看 + 编辑保存到 persist/system_prompt.md + 恢复默认 |
 
 ## 后端 API(只读,契约不变)
 
@@ -42,8 +44,12 @@ npm run dev                                # http://localhost:5173
 | `GET /api/runs/{id}` | `{meta, report}` |
 | `GET /api/runs/{id}/trace` | span 树 JSON(火焰图) |
 | `GET /api/runs/{id}/transcript?limit=N` | 消息流 |
+| `GET /api/runs/{id}/subagents` | 子 agent 活动(transcript 里 agent_id="subagent" 连续段聚合) |
+| `GET /api/stats/tools` | 工具使用统计(逐 run load trace 聚合 tool span) |
 | `GET /api/feedback` | 反馈聚合 |
-| `GET /api/system_prompt` | 系统提示词分层 |
+| `GET /api/system_prompt` | 系统提示词分层(source=override\|default) |
+| `POST /api/system_prompt` | 保存覆写到 persist/system_prompt.md |
+| `DELETE /api/system_prompt` | 删除覆写,恢复默认 |
 
 ## 火焰图 / 消息流约定
 
@@ -54,7 +60,7 @@ npm run dev                                # http://localhost:5173
 ## 观测性预留(待后端)
 
 - 上下文快照(observability-todo A):待 `ContextBuilder.build` 落 `context_snapshots.jsonl` + `/api/runs/{id}/context`,Run 详情「上下文快照」Tab 填充(消息按 origin 分层 + token 占比,对标 Langfuse 的差异点)。
-- 工具分析 `/api/stats/tools`:待后端聚合 tool span(latency P50/P95/重试)。
+- 工具分析 P50/P95 分位:已聚合 avg/重试/超时/错误分类(/tools),latency 分位待加。
 - cost:`cached_tokens` 已采,待 pricing 表(§8 TODO)。
 
 ## 构建
