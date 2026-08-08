@@ -21,12 +21,23 @@ from ..persist.paths import events_path
 
 
 class EventStore(EventSink):
-    """把 web 契约事件逐条追加到 events.jsonl。同一 run 跨 turn append(与 Persister 同模式)。"""
+    """把 web 契约事件逐条追加到 events.jsonl。同一 run 跨 turn append(与 Persister 同模式)。
+
+    seq:单调自增(断点续传游标用)。初始化时从已有行数恢复(跨进程 append 保持单调),
+    每条记录带 "seq",/stream 支持 Last-Event-ID 从游标后耐久补发。
+    """
 
     def __init__(self, run_id: str, path: str | None = None):
         self.run_id = run_id
         self._path: Path = Path(path) if path else events_path(run_id)
         self._fh = None
+        # 游标:从文件已有行数恢复(seq == 行号,单调递增;跨进程/重启续写不重置)
+        self._seq = 0
+        if self._path.exists():
+            try:
+                self._seq = sum(1 for _ in open(self._path, encoding="utf-8"))
+            except OSError:
+                self._seq = 0
 
     def emit(self, event) -> None:
         # delta 是瞬时流式(逐 token),不落盘——events.jsonl 保持消息级,
@@ -38,7 +49,8 @@ class EventStore(EventSink):
         if self._fh is None:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             self._fh = open(self._path, "a", encoding="utf-8")
-        rec = {"ts": time.time(), "type": type(event).__name__}
+        self._seq += 1
+        rec = {"ts": time.time(), "seq": self._seq, "type": type(event).__name__}
         rec.update(asdict(event))
         self._fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
         self._fh.flush()   # 低频追加写,sync flush 即可(同 Persister)

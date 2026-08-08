@@ -21,7 +21,7 @@ import json
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -31,7 +31,7 @@ from agent.bootstrap import build_runtime
 from agent.core.state import _ser
 from agent.core.workspace import Workspace
 from agent.streaming.sse_sink import SSESink
-from agent.streaming.events import RunEnd, StreamEvent, is_web_event
+from agent.streaming.events import RunEnd, StreamEvent, TextDelta, is_web_event
 from agent.persist.paths import PERSIST_ROOT
 from agent.persist.store import list_runs, read_run_report, read_transcript, read_events, set_run_title
 from agent.agentloop import _first_user_title
@@ -260,27 +260,62 @@ async def get_session(run_id: str):
     return rep.to_dict()
 
 
-async def _stream_gen(sess: SessionState):
-    """会话事件流生成器(常驻 SSE data 行):消费 sess.event_queue 的 web 契约事件。
-    独立命名以便测试直接驱动(queue -> SSE 行);端点只是 StreamingResponse 薄壳。"""
+def _last_events_seq(run_id: str) -> int:
+    """events.jsonl 当前最大 seq(游标续递增起点)。无文件/空 -> 0。"""
+    events = read_events(run_id)
+    if not events:
+        return 0
+    return max((e.get("seq") or 0) for e in events)
+
+
+async def _stream_gen(sess: SessionState, last_seq: int | None = None):
+    """会话事件流生成器(常驻 SSE):游标耐久补发 + 直播消费 sess.event_queue 的 web 契约事件。
+
+    - last_seq 非 None(来自 Last-Event-ID,断点续传):先补发 events.jsonl 里 seq > last_seq
+      的记录(带 id:<seq>),再直播;直播非 delta 事件带 id:<seq>(游标续递增),delta 不带 id
+      (delta 不落盘/不推进游标,重连靠 AssistantMessage 定稿)
+    - last_seq None:纯直播,游标从当前耐久最大 seq 续(直播非 delta 事件的 id 与 events.jsonl 对齐)
+    RunEnd 不 break(持久流,前端凭 RunStart/RunEnd 落 streaming 状态)。"""
+    if last_seq is not None:
+        live_seq = last_seq
+        for rec in read_events(sess.run_id, after_seq=last_seq) or []:
+            seq = rec.get("seq", 0)
+            live_seq = max(live_seq, seq)   # 直播游标从补发的最大 seq 续(避免与补发冲突)
+            yield f"id: {seq}\ndata: {json.dumps(rec, ensure_ascii=False)}\n\n"
+    else:
+        live_seq = _last_events_seq(sess.run_id)
     while True:
         ev = await sess.event_queue.get()
         if not is_web_event(ev):
             continue   # delta/机制事件:CLI/tracer 已消费,web 无需(吞掉不转发)
-        yield f"data: {json.dumps(_event_to_dict(ev), ensure_ascii=False)}\n\n"
+        if isinstance(ev, TextDelta):
+            # 逐字流式:不带 id(不落盘/不推进游标);重连后由 AssistantMessage 权威全文定稿
+            yield f"data: {json.dumps(_event_to_dict(ev), ensure_ascii=False)}\n\n"
+            continue
+        live_seq += 1
+        yield f"id: {live_seq}\ndata: {json.dumps(_event_to_dict(ev), ensure_ascii=False)}\n\n"
 
 
 @app.get("/sessions/{run_id}/stream")
-async def stream_session(run_id: str):
+async def stream_session(run_id: str, request: Request):
     """会话事件流(单通道):常驻 SSE,消费 sess.event_queue 的全部 web 契约事件。
 
     用户 turn(POST /turn 触发)与自动 turn(session loop)的事件都进 sess.event_queue,
     前端开一条 EventSource 订阅即拿到全部。连接断开会话内事件在队列缓冲,重连后补发。
-    RunEnd 不 break(持久流,前端凭 RunStart/RunEnd 落 streaming 状态)。"""
+    断点续传:EventSource 会自动在重连时带 Last-Event-ID(SSE 原生),本端点读它做
+    耐久补发(events.jsonl seq 之后)+ 直播。RunEnd 不 break(前端凭 RunStart/RunEnd 落状态)。"""
     sess = ensure_session(run_id)
     if not sess:
         raise HTTPException(status_code=404, detail="session not found")
-    return StreamingResponse(_stream_gen(sess), media_type="text/event-stream",
+    # 游标:Last-Event-ID 头(EventSource 自动)或 ?last_event_id= 查询参数
+    last_event_id = request.headers.get("Last-Event-ID") or request.query_params.get("last_event_id")
+    last_seq = None
+    if last_event_id:
+        try:
+            last_seq = int(last_event_id)
+        except (TypeError, ValueError):
+            last_seq = None   # 非法游标:退纯直播
+    return StreamingResponse(_stream_gen(sess, last_seq), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 

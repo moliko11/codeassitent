@@ -276,7 +276,8 @@ def test_stream_gen_serves_session_queue(tmp_path, monkeypatch):
     async def _run():
         types: list[str] = []
         async for line in server._stream_gen(sess):
-            ev = json.loads(line[6:])   # 剥 "data: " 前缀
+            data = line.split("\ndata: ", 1)[-1]   # 剥可选 "id: N\n" + "data: " 前缀
+            ev = json.loads(data)
             types.append(ev["type"])
             if ev["type"] == "RunEnd":
                 break   # 测试侧 break(生产流常驻)
@@ -284,3 +285,45 @@ def test_stream_gen_serves_session_queue(tmp_path, monkeypatch):
 
     types = asyncio.run(_run())
     assert types == ["RunStart", "AssistantMessage", "RunEnd"]
+
+
+@requires_server
+def test_stream_gen_resumes_from_cursor(tmp_path, monkeypatch):
+    """断点续传:last_seq 非 None 时,先耐久补发 events.jsonl 里 seq>last_seq 的(带 id:),
+    再直播队列;直播非 delta 事件带 id(游标续递增),delta 不带 id。"""
+    import json
+
+    from chatweb.backend import server
+    from agent.streaming.event_store import EventStore
+    from agent.streaming.events import RunStart, AssistantMessage, RunEnd, TextDelta
+    import agent.persist.paths as paths
+
+    monkeypatch.setattr(paths, "PERSIST_ROOT", tmp_path / "runs")
+    sess = server.SessionState.create(
+        registry=server._registry, model_adapter=object(), tool_executor=server._tool_executor,
+        config=server._config, guardrail_runner=server._guardrail_runner,
+        memory_store=server._memory_store, workspace=server._workspace,
+    )
+    # 耐久落 3 条(seq 1,2,3)
+    store = EventStore(sess.run_id)
+    store.emit(RunStart(run_id=sess.run_id))
+    store.emit(AssistantMessage(run_id=sess.run_id, uuid="u1", text="hi"))
+    store.emit(RunEnd(status="completed"))
+    store.close()
+    # 直播队列:一条 delta + 一条消息(游标续到 4)
+    sess.event_queue.put_nowait(TextDelta(text="live"))
+    sess.event_queue.put_nowait(AssistantMessage(run_id=sess.run_id, uuid="u2", text="live"))
+
+    async def _run():
+        lines: list[str] = []
+        async for line in server._stream_gen(sess, last_seq=1):
+            lines.append(line)
+            if "u2" in line:
+                break
+        return lines
+
+    lines = asyncio.run(_run())
+    assert "id: 2" in lines[0] and "u1" in lines[0]   # 耐久补发 seq2
+    assert "id: 3" in lines[1]                        # 耐久补发 seq3(RunEnd)
+    assert lines[2].startswith("data: ") and "id:" not in lines[2]   # delta 不带 id
+    assert "id: 4" in lines[3] and "u2" in lines[3]   # 直播消息游标续到 4

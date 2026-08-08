@@ -30,12 +30,13 @@ def read_transcript(run_id: str):
                 _log.warning("read_transcript: 跳过损坏行 (run_id=%s)", run_id)
 
 
-def read_events(run_id: str) -> list[dict] | None:
+def read_events(run_id: str, after_seq: int | None = None) -> list[dict] | None:
     """读 events.jsonl(前端事件流)供前端重放,恢复画面 = 直播画面。
 
     无 events.jsonl(老 run,只有 transcript)返回 None,调用方退回落 transcript;
-    损坏行跳过+告警(同 read_transcript)。返回的事件列表每条含 type/字段/ts,
+    损坏行跳过+告警(同 read_transcript)。返回的事件列表每条含 type/字段/ts/seq,
     前端可直接过 eventReducer 重放(不需要第二套恢复逻辑)。
+    after_seq(断点续传游标):非 None 时只返 seq > after_seq 的记录(重连耐久补发)。
     """
     from . import paths
     p = paths.PERSIST_ROOT / run_id / "events.jsonl"   # 直构,避免 run_dir 的 mkdir 副作用(同 read_run_report)
@@ -48,9 +49,13 @@ def read_events(run_id: str) -> list[dict] | None:
             if not line:
                 continue
             try:
-                out.append(json.loads(line))
+                rec = json.loads(line)
             except json.JSONDecodeError:
                 _log.warning("read_events: 跳过损坏行 (run_id=%s)", run_id)
+                continue
+            if after_seq is not None and (rec.get("seq") or 0) <= after_seq:
+                continue
+            out.append(rec)
     return out
 
 

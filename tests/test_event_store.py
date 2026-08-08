@@ -167,6 +167,36 @@ def test_read_events_from_disk(tmp_path):
     assert [e["type"] for e in events2] == ["RunStart", "AssistantMessage"]
 
 
+def test_events_have_monotonic_seq(tmp_path):
+    """EventStore 写 seq(断点续传游标),跨实例 append 保持单调(从已有行数续)。"""
+    run_id = "es-seq"
+    s1 = EventStore(run_id)
+    s1.emit(RunStart(run_id=run_id))                                    # seq 1
+    s1.emit(AssistantMessage(run_id=run_id, uuid="u1", text="a"))       # seq 2
+    s1.close()
+    s2 = EventStore(run_id)   # 模拟重启/跨 session 续写
+    s2.emit(RunEnd(status="completed"))                                 # seq 3(不重置)
+    s2.close()
+    assert [e["seq"] for e in read_events(run_id)] == [1, 2, 3]
+
+
+def test_read_events_after_seq(tmp_path):
+    """断点续传:after_seq 只返 seq 更大的记录。"""
+    run_id = "es-cursor"
+    store = EventStore(run_id)
+    try:
+        store.emit(RunStart(run_id=run_id))
+        store.emit(AssistantMessage(run_id=run_id, uuid="u1", text="a"))
+        store.emit(RunEnd(status="completed"))
+    finally:
+        store.close()
+    all_ev = read_events(run_id)
+    assert [e["seq"] for e in all_ev] == [1, 2, 3]
+    after = read_events(run_id, after_seq=1)
+    assert [e["seq"] for e in after] == [2, 3]
+    assert read_events(run_id, after_seq=3) == []   # 全看过 -> 无补发
+
+
 def test_agentloop_persist_writes_events_jsonl(tmp_path):
     """端到端:agentloop(persist=True, mock adapter)在 run/ 落盘 events.jsonl(web 契约事件)。
     形状 = server._event_to_dict(type + 字段),前端 eventReducer 可直接重放。"""
