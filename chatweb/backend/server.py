@@ -27,22 +27,14 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 # ---- code/agent 复用(import 一次,模块级共享)----
-from agent import tools as _tools
-from agent.config.provider import load_provider_config, make_adapter
-from agent.config.loader import (
-    build_agent_config, build_guardrail_runner, build_memory_params,
-    build_tool_executor_params, get_section,
-)
+from agent.bootstrap import build_runtime
 from agent.core.state import _ser
 from agent.core.workspace import Workspace
 from agent.streaming.sse_sink import SSESink
 from agent.streaming.events import RunEnd, StreamEvent, is_web_event
-from agent.persist.paths import memory_dir, PERSIST_ROOT
+from agent.persist.paths import PERSIST_ROOT
 from agent.persist.store import list_runs, read_run_report, read_transcript, read_events, set_run_title
-from agent.memory import MemoryStore
-from agent.tools.memory_tool import make_save_memory_tool
-from agent.tools.task_tool import make_task_tool
-from agent.agentloop import _first_user_title, _track_edit_callback
+from agent.agentloop import _first_user_title
 from agent.persist.replay import resume
 from agent.prompts import build_system_prompt
 from agent.core.messages import Message
@@ -54,38 +46,18 @@ from .session_manager import SessionManager, SessionState, make_file_history
 from .file_history_api import router as file_history_router
 
 
-# ─────────────────── 装配(模块级共享件,对齐 main() agentloop.py:618)───────────────────
-
-_pc = load_provider_config()   # provider 默认走 provider.yaml(default: openai_compatible);AGENT_PROVIDER env 可覆盖
-if not _pc.api_key:
-    raise RuntimeError(f"未设置 {_pc.provider} 的 API key,请在 code/.env 配置对应 key")
-_adapter = make_adapter(_pc)
-_config = build_agent_config({"model": _pc.model})
-_workspace = Workspace(root=Path.cwd())  # web server 须在 code/ 下启动(同 REPL,PERSIST_ROOT 相对路径)
-
-_registry = _tools.registry
-# guardrail 链(guardrails.yaml 控制启用清单;未知 guard 名 fail-fast)
-_guardrail_runner = build_guardrail_runner()
-# 可靠性四件套 + 执行参数(reliability.yaml)
-from agent.tools.registry import ToolExecutor
-_tool_executor = ToolExecutor(
-    _registry,
-    before_mutation=_track_edit_callback,   # Phase 2 §2.5:Edit/Write 写盘前备份(file_history 版本链条)
-    guardrail_runner=_guardrail_runner,
-    config=_config,
-    confirmer=web_confirmer,         # 阶段0(Phase A):HITL 走 web_confirmer(推前端弹窗+await future)
-    **build_tool_executor_params(),
-)
-# 工具超时/截断参数(tools.yaml)
-from agent.tools.settings import configure_tools
-configure_tools(get_section("tools"))
-# memory + 工具注册(同 main L650-657)
-_memory_store = MemoryStore(memory_dir(), **build_memory_params())
-_registry.register(make_save_memory_tool(_memory_store))
-try:
-    _registry.register(make_task_tool())   # Task 工具(主 agent 派子 agent)
-except Exception:
-    pass  # 已注册则跳过
+# ─────────────────── 组合根(模块级共享件)───────────────────
+# 共享运行时依赖(adapter/config/guardrail/tool_executor/memory/tools 注册)唯一装配点
+# 在 agent/bootstrap.py(CLI main 与 web server 共用);本 server 只注入 web_confirmer 并
+# 建自己的 workspace。web server 须在 code/ 下启动(同 REPL,PERSIST_ROOT 相对路径)。
+_rt = build_runtime(confirmer=web_confirmer)   # 阶段0(Phase A):HITL 走 web_confirmer(推前端弹窗+await future)
+_adapter = _rt.model_adapter
+_config = _rt.config
+_registry = _rt.registry
+_guardrail_runner = _rt.guardrail_runner
+_tool_executor = _rt.tool_executor
+_memory_store = _rt.memory_store
+_workspace = Workspace(root=Path.cwd())
 
 session_manager = SessionManager()
 

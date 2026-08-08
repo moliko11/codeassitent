@@ -16,12 +16,10 @@ from .control.loop_detector import LoopDetector
 from .control.planner import Planner
 from .control.critic import Critic
 from .config.loader import (
-    build_agent_config, build_context_builder_params, build_guardrail_runner,
-    build_memory_params, build_tool_executor_params, exit_words, get_section,
+    build_context_builder_params, exit_words,
 )
 
 from .config.config import AgentConfig
-from .config.provider import load_provider_config, make_adapter
 from .core.state import AgentState, ToolHistoryEntry
 from .core.workspace import Workspace
 
@@ -774,42 +772,15 @@ async def run_agent_loop(registry: ToolRegistry,
         session.close()   # 幂等:正常退出已 close,异常路径兜底
 
 def main():
-    # 用 tools 子包的默认 registry：@tool 装饰器把 getnowtime 注册到了那里
-    import agent.tools
-    registry = agent.tools.registry
-    # 装配全部走 code/config/*.yaml(缺省回落 Python 默认,行为与旧硬编码一致)。
-    # provider 默认见 provider.yaml(现 openai_compatible/DeepSeek),AGENT_PROVIDER env 可覆盖。
-    pc = load_provider_config()
-    if not pc.api_key:
-        prefix = "VOLCANO_ENGINE" if pc.provider == "ark" else "DEEPSEEK"
-        raise SystemExit(f"未设置 {prefix}_API_KEY，请在 code/.env 配置 {prefix}_API_KEY/BASE_URL/MODEL")
-    model_adapter = make_adapter(pc)
-    # 用 provider 配置里的 model(DEEPSEEK_MODEL)覆盖 AgentConfig 默认,否则 agentloop 会把
-    # config.model 直接发给 API,provider 的 model 形同虚设。
-    config = build_agent_config({"model": pc.model})
-    # 阶段8: GuardrailRunner + 默认 Guard(guardrails.yaml 控制启用清单;未知 guard 名 fail-fast)
-    # 阶段0(Phase A):权限判定在 ToolExecutor.can_use_tool(默认 cli_confirmer),不注册为 guard。
-    guardrail_runner = build_guardrail_runner()
-    # 可靠性四件套 + 执行参数(reliability.yaml;audit disabled -> audit_logger=None)。
-    tool_executor = ToolExecutor(
-        registry, before_mutation=_track_edit_callback,
-        guardrail_runner=guardrail_runner, config=config,
-        **build_tool_executor_params(),
-    )
-
-    # 工具超时/截断参数(tools.yaml),给 @tool handler 的 t() 查找用
-    from .tools.settings import configure_tools
-    configure_tools(get_section("tools"))
-    # 步6:创建 memory_store + 注册 save_memory 工具(闭包捕获 store)
-    from .memory import MemoryStore
-    from .persist.paths import memory_dir
-    from .tools.memory_tool import make_save_memory_tool
-    from .tools.task_tool import make_task_tool
-    memory_store = MemoryStore(memory_dir(), **build_memory_params())
-    registry.register(make_save_memory_tool(memory_store))
-    registry.register(make_task_tool())  # 阶段10:Task 工具(主 agent 派子 agent,CC 小弟模型)
-
+    # 组合根(agent/bootstrap.py):共享运行时依赖(adapter/config/guardrail/tool_executor/
+    # memory/tools 注册)唯一装配点,CLI 与 web server 共用。
+    from .bootstrap import build_runtime
+    try:
+        rt = build_runtime()   # confirmer 缺省 = cli_confirmer(CLI)
+    except RuntimeError as e:
+        raise SystemExit(str(e))
     import asyncio
-    asyncio.run(run_agent_loop(registry, model_adapter, tool_executor, config=config))
+    asyncio.run(run_agent_loop(rt.registry, rt.model_adapter, rt.tool_executor,
+                               config=rt.config, memory_store=rt.memory_store))
 if __name__ == "__main__":
     main()
