@@ -32,7 +32,8 @@ from .streaming.sink import EventSink, CompositeSink
 from .streaming.event_store import EventStore
 from .streaming.events import RunStart, TaskNotification
 from .tracing import Tracer, TraceStore, MetricsCollector
-from .agentloop import _run_turn, _emit_run_end, _first_user_title, _write_run_meta
+from .runner import _run_turn, _emit_run_end
+from .agentloop import _first_user_title, _write_run_meta
 
 
 @dataclass

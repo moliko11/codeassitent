@@ -11,6 +11,7 @@ from ..core.state import AgentState
 from ..runtime import RuntimeContext
 from ..config.config import AgentConfig
 from ..tools import _runtime_state
+from ..runner import _run_turn   # loop 机制在 runner(模块级导入;runner 不反向依赖 multiagent,无环)
 from .blackboard import Blackboard
 
 
@@ -65,8 +66,6 @@ class Agent:
         返回子 AgentState(含 final_response)。persister=None 不落盘(§8.3);传 persister 则子 agent
         事件落该 transcript(Task 工具传主 persister + agent_id="subagent",web 可展示子 agent 流)。
         """
-        from ..agentloop import _run_turn  # 延迟导入,避免 agentloop <-> multiagent 循环引用
-
         # commit 10:设当前 agent role(多 Agent tracing;Tracer 把它写进 span attrs)
         _runtime_state.agent_id.set(self.role)
 
