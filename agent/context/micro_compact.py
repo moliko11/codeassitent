@@ -18,13 +18,8 @@ CLEARED_MESSAGE = "[Old tool result content cleared]"
 
 
 def _is_tool_result(msg: Message) -> bool:
-    """识别 role=tool 的消息(同 budget.py 判据)。"""
-    return (
-        msg.role == "tool"
-        and isinstance(msg.content, dict)
-        and "tool_call_id" in msg.content
-        and "content" in msg.content
-    )
+    """识别 role=tool 的消息(同 budget.py 判据;结构化后只看 role)。"""
+    return msg.role == "tool"
 
 
 def _is_persisted_reference(text) -> bool:
@@ -51,12 +46,10 @@ def micro_compact(messages: list[Message], keep_recent: int = 3) -> list[Message
         if i not in to_clear:
             out.append(msg)
             continue
-        text = msg.content["content"]
+        text = msg.content
         if _is_persisted_reference(text):
             out.append(msg)  # 落盘引用保留(模型可 Read 回)
             continue
-        # 原始文本 -> 清成占位(新建 Message,不动原对象)
-        new_content = dict(msg.content)
-        new_content["content"] = CLEARED_MESSAGE
-        out.append(Message(role=msg.role, content=new_content, meta=msg.meta))
+        # 原始文本 -> 清成占位(新建 Message,不动原对象;meta 保留)
+        out.append(Message(role=msg.role, content=CLEARED_MESSAGE, meta=msg.meta))
     return out

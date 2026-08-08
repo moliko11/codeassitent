@@ -25,17 +25,9 @@ PERSISTED_CLOSE_TAG = "</persisted-output>"
 
 
 def _is_tool_result(msg: Message) -> bool:
-    """识别 role=tool 的消息(OpenAI 兼容格式:content 是 dict,含 tool_call_id + content)。
-
-    对齐 adapters/openai_compat.py 的 append_tool_result 产出的格式。
-    test_smoke 的 _ScriptedAdapter 用字符串 content(非 dict),不会被识别--真实 adapter 才走这条路径。
-    """
-    return (
-        msg.role == "tool"
-        and isinstance(msg.content, dict)
-        and "tool_call_id" in msg.content
-        and "content" in msg.content
-    )
+    """识别 role=tool 的消息(结构化:content=文本,meta.tool_call_id 关联;不再嗅探 dict)。
+    修泄漏:适配器 append_tool_result 统一产出 role=tool,mock 与真实 adapter 一视同仁。"""
+    return msg.role == "tool"
 
 
 def _persist(run_id: str, call_id: str, text: str) -> Path:
@@ -74,15 +66,16 @@ def apply_tool_result_budget(
         if not _is_tool_result(msg):
             out.append(msg)
             continue
-        text = msg.content["content"]
+        text = msg.content
         if not isinstance(text, str) or len(text) <= threshold:
             out.append(msg)
             continue
-        call_id = msg.content["tool_call_id"]
+        call_id = msg.meta.get("tool_call_id")
+        if not call_id:
+            out.append(msg)
+            continue
         path = _persist(run_id, call_id, text)
         ref = _build_reference(path, text)
-        # 新建 Message(不动原对象):content dict 浅拷贝,"content" 换成引用
-        new_content = dict(msg.content)
-        new_content["content"] = ref
-        out.append(Message(role=msg.role, content=new_content, meta=msg.meta))
+        # 新建 Message(不动原对象):content 换成引用,meta(含 tool_call_id)保留
+        out.append(Message(role=msg.role, content=ref, meta=msg.meta))
     return out

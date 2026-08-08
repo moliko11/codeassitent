@@ -195,30 +195,43 @@ class ArkAdapter(BaseModelAdapter):
         )
 
     def _to_input(self, messages: list[Message]) -> list[dict[str, Any]]:
-        """内部 messages -> Ark input 数组。
+        """把结构化 Message 转成 Ark(Responses API) input 数组。
 
-        约定（与 openai_compat 一致）：
-        - msg.content 是 dict 且含 "type"：原样透传（function_call / function_call_output 等）
-        - msg.content 是 list：扩展
-        - 否则：构造 {role, content:[{type:input_text/output_text, text}]}
+        provider wire 格式只在此收敛(修泄漏:不再透传含 type 的 dict——Message.content
+        恒为文本,tool 元数据在 meta,由这里展开成 function_call / function_call_output 项)。
         """
         items: list[dict[str, Any]] = []
         for msg in messages:
-            if isinstance(msg.content, dict) and "type" in msg.content:
-                items.append(msg.content)
-                continue
-            if isinstance(msg.content, list):
-                items.extend(msg.content)
-                continue
-            # 文本内容：按 role 决定 content 形式
+            meta = msg.meta or {}
             text = str(msg.content) if msg.content is not None else ""
+            if msg.role == "tool":
+                # 工具结果 -> function_call_output 项(Responses API 扁平格式,无 role)
+                items.append({
+                    "type": "function_call_output",
+                    "call_id": meta.get("tool_call_id"),
+                    "output": text,
+                })
+                continue
             if msg.role in ("system", "developer"):
                 # system/developer 用字符串 content；output_text 是 assistant 输出类型，不能用于输入消息
                 items.append({"role": msg.role, "content": text})
-            elif msg.role == "user":
+                continue
+            if msg.role == "user":
                 items.append({"role": "user", "content": [{"type": "input_text", "text": text}]})
-            else:  # assistant
+                continue
+            # assistant: text 项 + 每个 tool_call 的 function_call 项(Responses API 扁平格式)
+            if text:
                 items.append({"role": "assistant", "content": [{"type": "output_text", "text": text}]})
+            for tc in meta.get("tool_calls") or []:
+                args = tc.get("arguments")
+                if isinstance(args, dict):
+                    args = json.dumps(args, ensure_ascii=False)
+                items.append({
+                    "type": "function_call",
+                    "call_id": tc.get("call_id", ""),
+                    "name": tc.get("tool_name", ""),
+                    "arguments": args or "{}",
+                })
         return items
 
     def _build_tools(self, tool_specs: list[ToolSpec]) -> list[dict[str, Any]]:
@@ -288,44 +301,33 @@ class ArkAdapter(BaseModelAdapter):
     def append_assistant(
         self, messages: list[Message], model_response: ModelResponse
     ) -> list[Message]:
-        """追加 assistant 消息（Responses API 格式）。
-        text（无论是否带 tool_calls）-> message 项；有 tool_calls 再追加 function_call 项。
+        """追加 assistant 消息（结构化:content=text,tool_calls 存 meta）。
+        text（无论是否带 tool_calls）与 function_call 项由 _to_input 展开。
         最终回答也进 messages 作历史（推翻 Decision 3）；带 tool_calls 时的 text 也进（bug3），
         否则下一轮看不到 assistant 的说明文字。"""
         new_messages = list(messages)
-        # assistant 的 text 进 messages：_to_input else 分支转 {role:assistant, content:[{type:output_text}]}。
-        # 无 tool_calls 时 text 即最终回答（bug1）；有 tool_calls 时 text 是说明，也要让下一轮看到（bug3）。
-        if model_response.text:
-            new_messages.append(Message(
-                role="assistant",
-                content=model_response.text,
-            ))
-        for tc in model_response.tool_calls:
-            args = tc.arguments
-            if isinstance(args, dict):
-                args = json.dumps(args, ensure_ascii=False)
-            new_messages.append(Message(
-                role="assistant",
-                content={
-                    "type": "function_call",
-                    "call_id": tc.call_id,
-                    "name": tc.tool_name,
-                    "arguments": args or "{}",
-                },
-            ))
+        meta = {}
+        if model_response.tool_calls:
+            meta["tool_calls"] = [
+                {"call_id": tc.call_id, "tool_name": tc.tool_name, "arguments": tc.arguments}
+                for tc in model_response.tool_calls
+            ]
+        new_messages.append(Message(
+            role="assistant",
+            content=model_response.text or "",
+            meta=meta,
+        ))
         return new_messages
 
     def append_tool_result(
         self, messages: list[Message], result: ToolResult
     ) -> list[Message]:
-        """追加单条 function_call_output。"""
+        """追加单条工具结果（role=tool,content=文本,meta.tool_call_id 关联;
+        _to_input 展开成 function_call_output 项）。"""
         new_messages = list(messages)
         new_messages.append(Message(
-            role="user",
-            content={
-                "type": "function_call_output",
-                "call_id": result.call_id,
-                "output": self._tool_result_to_text(result),
-            },
+            role="tool",
+            content=self._tool_result_to_text(result),
+            meta={"tool_call_id": result.call_id},
         ))
         return new_messages

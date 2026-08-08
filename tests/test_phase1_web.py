@@ -55,7 +55,8 @@ def test_first_user_title_truncates():
 
 
 def test_first_user_title_skips_non_str_content():
-    """dict content(工具轮 user 回灌)跳过,不崩溃。"""
+    """非 str content 跳过,不崩溃(防御路径:结构化后适配器不再产出 dict content,
+    工具结果已是 role=tool;但标题推导对非 str 仍应稳健)。"""
     msgs = [Message(role="user", content={"type": "function_call_output", "call_id": "x"})]
     assert _first_user_title(msgs) == ""
 

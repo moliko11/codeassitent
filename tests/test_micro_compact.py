@@ -9,7 +9,7 @@ from agent.core.messages import Message
 
 
 def _tool_msg(call_id: str, text: str) -> Message:
-    return Message(role="tool", content={"role": "tool", "tool_call_id": call_id, "content": text})
+    return Message(role="tool", content=text, meta={"tool_call_id": call_id})
 
 
 def _user_msg(text: str) -> Message:
@@ -26,10 +26,10 @@ def test_keeps_recent_k_tool_results():
     ]
     out = micro_compact(msgs, keep_recent=2)
     # 最近 2 个(c3, c4)保留原文;更早的 c1, c2 被清
-    cleared_texts = [m.content["content"] for m in out if m.role == "tool" and m.content["content"] == CLEARED_MESSAGE]
+    cleared_texts = [m.content for m in out if m.role == "tool" and m.content == CLEARED_MESSAGE]
     assert len(cleared_texts) == 2  # c1, c2
     # c3, c4 原文保留
-    tool_texts = [m.content["content"] for m in out if m.role == "tool"]
+    tool_texts = [m.content for m in out if m.role == "tool"]
     assert "old3" in tool_texts and "recent1" in tool_texts
 
 
@@ -46,15 +46,15 @@ def test_persisted_reference_not_cleared():
     msgs = [_tool_msg("c1", ref), _tool_msg("c2", "recent")]
     out = micro_compact(msgs, keep_recent=1)
     # c1 是引用,即使老也保留(不清成 CLEARED_MESSAGE)
-    c1_out = [m for m in out if m.content.get("tool_call_id") == "c1"][0]
-    assert c1_out.content["content"] == ref
+    c1_out = [m for m in out if m.meta.get("tool_call_id") == "c1"][0]
+    assert c1_out.content == ref
 
 
 def test_original_message_not_mutated():
     """不改原始 Message 对象。"""
     msgs = [_tool_msg("c1", "old"), _tool_msg("c2", "recent")]
     micro_compact(msgs, keep_recent=1)
-    assert msgs[0].content["content"] == "old"  # 原对象没被改
+    assert msgs[0].content == "old"  # 原对象没被改
 
 
 def test_non_tool_messages_passthrough():

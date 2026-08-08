@@ -12,10 +12,11 @@ from agent.core.messages import Message
 
 
 def _tool_msg(call_id: str, text: str) -> Message:
-    """构造 OpenAI 兼容格式的 tool 结果消息(对齐 openai_compat.append_tool_result)。"""
+    """构造结构化 tool 结果消息(对齐 openai_compat.append_tool_result:content=文本,meta 关联)。"""
     return Message(
         role="tool",
-        content={"role": "tool", "tool_call_id": call_id, "content": text},
+        content=text,
+        meta={"tool_call_id": call_id},
     )
 
 
@@ -24,7 +25,7 @@ def test_small_result_not_persisted(tmp_path, monkeypatch):
     monkeypatch.setattr("agent.persist.paths.PERSIST_ROOT", tmp_path / "runs")
     msgs = [_tool_msg("c1", "small")]
     out = apply_tool_result_budget(msgs, "run-x")
-    assert out[0].content["content"] == "small"
+    assert out[0].content == "small"
     assert not (tmp_path / "runs" / "run-x" / "tool-results" / "c1.txt").exists()
 
 
@@ -35,11 +36,11 @@ def test_large_result_persisted_and_replaced(tmp_path, monkeypatch):
     msgs = [_tool_msg("c1", big)]
     out = apply_tool_result_budget(msgs, "run-x")
 
-    ref = out[0].content["content"]
+    ref = out[0].content
     assert PERSISTED_TAG in ref               # 是引用
     assert "c1.txt" in ref                    # 引用里带路径
     assert "X" * 100 in ref                   # 预览含前 N 字符
-    assert out[0].content["tool_call_id"] == "c1"   # call_id 保留
+    assert out[0].meta["tool_call_id"] == "c1"   # call_id 保留
 
     # 全文落盘且内容完整
     f = tmp_path / "runs" / "run-x" / "tool-results" / "c1.txt"
@@ -53,7 +54,7 @@ def test_original_message_not_mutated(tmp_path, monkeypatch):
     big = "Y" * (PERSIST_THRESHOLD_CHARS + 10)
     orig = _tool_msg("c1", big)
     apply_tool_result_budget([orig], "run-x")
-    assert orig.content["content"] == big     # 原对象没被改
+    assert orig.content == big     # 原对象没被改
 
 
 def test_idempotent(tmp_path, monkeypatch):
@@ -63,7 +64,7 @@ def test_idempotent(tmp_path, monkeypatch):
     msgs = [_tool_msg("c1", big)]
     out1 = apply_tool_result_budget(msgs, "run-x")
     out2 = apply_tool_result_budget(msgs, "run-x")
-    assert out1[0].content["content"] == out2[0].content["content"]
+    assert out1[0].content == out2[0].content
 
 
 def test_non_tool_messages_passthrough(tmp_path, monkeypatch):

@@ -171,26 +171,40 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
         )
 
     def _to_chat_messages(self, messages: list[Message]) -> list[dict[str, Any]]:
-        """把内部 Message 转成 Chat Completions 的 messages 数组。
+        """把结构化 Message 转成 Chat Completions 的 messages 数组。
 
-        约定：若 msg.content 本身就是一条完整的 chat message dict（含 "role"），
-        就原样透传——用于携带 tool_calls 的 assistant 消息和 tool 结果消息。
+        provider wire 格式只在此收敛(修泄漏:不再透传含 role 的 dict——Message.content
+        恒为文本,assistant 的 tool_calls 在 meta,由这里展开成 wire tool_calls)。
         """
         items: list[dict[str, Any]] = []
         for msg in messages:
-            if isinstance(msg.content, dict) and "role" in msg.content:
-                items.append(msg.content)
-                continue
-            if isinstance(msg.content, list):
-                items.extend(msg.content)
-                continue
-            items.append(
-                {
-                    "role": msg.role,
-                    "content": str(msg.content) if msg.content is not None else "",
-                }
-            )
+            items.append(self._to_chat_message(msg))
         return items
+
+    def _to_chat_message(self, msg: Message) -> dict[str, Any]:
+        """单条 Message -> chat message dict。"""
+        meta = msg.meta or {}
+        if msg.role == "tool":
+            return {
+                "role": "tool",
+                "tool_call_id": meta.get("tool_call_id"),
+                "content": str(msg.content) if msg.content is not None else "",
+            }
+        if msg.role == "assistant":
+            tcs = meta.get("tool_calls") or []
+            if tcs:
+                wire_tcs = []
+                for tc in tcs:
+                    args = tc.get("arguments")
+                    if isinstance(args, dict):
+                        args = json.dumps(args, ensure_ascii=False)
+                    wire_tcs.append({
+                        "id": tc.get("call_id", ""),
+                        "type": "function",
+                        "function": {"name": tc.get("tool_name", ""), "arguments": args or "{}"},
+                    })
+                return {"role": "assistant", "content": msg.content or None, "tool_calls": wire_tcs}
+        return {"role": msg.role, "content": str(msg.content) if msg.content is not None else ""}
     def _to_chat_tools(self, tool_specs):
         out = []
         for ts in tool_specs:
@@ -248,48 +262,32 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
     def append_assistant(
         self, messages: list[Message], model_response: ModelResponse
     ) -> list[Message]:
-        """追加 assistant 消息（Chat Completions 格式）。
-        有 tool_calls -> 带 tool_calls 的 assistant；无 tool_calls -> 纯 text assistant
-        （最终回答也进 messages 作历史，推翻 Decision 3：多轮需要上一轮 final 作上下文）。"""
+        """追加 assistant 消息（结构化:content=文本,tool_calls 存 meta）。
+        有 tool_calls -> meta 存结构化 tool_calls;无 tool_calls -> 纯 text assistant
+        （最终回答也进 messages 作历史，推翻 Decision 3：多轮需要上一轮 final 作上下文）。
+        wire 的 tool_calls 由 _to_chat_message 从这里展开。"""
         new_messages = list(messages)
+        meta = {}
         if model_response.tool_calls:
-            tool_calls = []
-            for tc in model_response.tool_calls:
-                args = tc.arguments
-                if isinstance(args, dict):
-                    args = json.dumps(args, ensure_ascii=False)
-                tool_calls.append({
-                    "id": tc.call_id,
-                    "type": "function",
-                    "function": {"name": tc.tool_name, "arguments": args or "{}"},
-                })
-            new_messages.append(Message(
-                role="assistant",
-                content={
-                    "role": "assistant",
-                    "content": model_response.text or None,
-                    "tool_calls": tool_calls,
-                },
-            ))
-        else:
-            # 最终回答：纯 text assistant（_to_chat_messages else 分支转 {role:assistant, content:text}）
-            new_messages.append(Message(
-                role="assistant",
-                content=model_response.text or "",
-            ))
+            meta["tool_calls"] = [
+                {"call_id": tc.call_id, "tool_name": tc.tool_name, "arguments": tc.arguments}
+                for tc in model_response.tool_calls
+            ]
+        new_messages.append(Message(
+            role="assistant",
+            content=model_response.text or "",
+            meta=meta,
+        ))
         return new_messages
 
     def append_tool_result(
         self, messages: list[Message], result: ToolResult
     ) -> list[Message]:
-        """追加单条 tool 结果（role=tool，带 tool_call_id）。"""
+        """追加单条 tool 结果（role=tool,content=文本,meta.tool_call_id 关联）。"""
         new_messages = list(messages)
         new_messages.append(Message(
             role="tool",
-            content={
-                "role": "tool",
-                "tool_call_id": result.call_id,
-                "content": self._tool_result_to_text(result),
-            },
+            content=self._tool_result_to_text(result),
+            meta={"tool_call_id": result.call_id},
         ))
         return new_messages

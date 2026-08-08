@@ -18,17 +18,12 @@ class Handoff:
 
 
 def _tool_result_text(content: Any) -> Optional[str]:
-    """从 message.content 提取工具结果文本(兼容 mock/openai_compat/ark 三种 append_tool_result 格式)。
+    """从 message.content 提取工具结果文本。
 
-    - mock:        content 是 str(= r.text,即 formatter 的 JSON)
-    - openai_compat: content 是 dict {"role":"tool","tool_call_id":...,"content": <text>}
-    - ark:         content 是 dict {"type":"function_call_output","call_id":...,"output": <text>}(且 role=user)
+    结构化后(content 恒为文本)直接返回;非 str(多模态/防御)返回 None。
+    修泄漏:不再兼容 mock/openai_compat/ark 三种 dict 格式——适配器统一产出文本 content。
     """
-    if isinstance(content, str):
-        return content
-    if isinstance(content, dict):
-        return content.get("content") or content.get("output")
-    return None
+    return content if isinstance(content, str) else None
 
 
 def detect_handoff(state: AgentState) -> Optional[Handoff]:

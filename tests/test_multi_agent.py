@@ -435,22 +435,18 @@ def test_task_tool_background():
 
 
 def test_detect_handoff_multi_adapter():
-    """detect_handoff 兼容 mock(str)/openai_compat(dict['content'])/ark(dict['output']) 三种格式。"""
+    """detect_handoff 识别结构化 tool 结果消息(content=文本;适配器统一产出,不再分 mock/dict 格式)。"""
     def hj(role, ctx):
         return json.dumps({"ok": True, "tool": "handoff",
                            "data": {"to_role": role, "context": ctx}}, ensure_ascii=False)
 
-    # mock: content 是 str
-    h = detect_handoff(AgentState(messages=[Message(role="tool", content=hj("search", "找X"))]))
+    # 结构化:role=tool, content=文本, meta.tool_call_id 关联(openai_compat / ark 统一格式)
+    h = detect_handoff(AgentState(messages=[Message(role="tool", content=hj("search", "找X"),
+                                                    meta={"tool_call_id": "c"})]))
     assert h and h.to_role == "search" and h.context == "找X"
-    # openai_compat: content 是 dict {"role":"tool",...,"content": <text>}
-    h = detect_handoff(AgentState(messages=[Message(role="tool",
-        content={"role": "tool", "tool_call_id": "c", "content": hj("coder", "写")})]))
+    h = detect_handoff(AgentState(messages=[Message(role="tool", content=hj("coder", "写"),
+                                                    meta={"tool_call_id": "c"})]))
     assert h and h.to_role == "coder" and h.context == "写"
-    # ark: content 是 dict {"type":"function_call_output",...,"output": <text>}, role=user
-    h = detect_handoff(AgentState(messages=[Message(role="user",
-        content={"type": "function_call_output", "call_id": "c", "output": hj("reviewer", "查")})]))
-    assert h and h.to_role == "reviewer" and h.context == "查"
     # 非 handoff 工具结果 -> None
     assert detect_handoff(AgentState(messages=[Message(role="tool",
         content=json.dumps({"ok": True, "tool": "read_file", "data": "x"}))])) is None

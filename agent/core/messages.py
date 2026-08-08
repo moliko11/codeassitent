@@ -8,10 +8,29 @@ from .enums import Role, ContentType
 
 @dataclass
 class Message:
-    """统一对话消息（精简版，通用推荐）"""
+    """统一对话消息（精简版，通用推荐）。
+
+    结构化约定（修 provider 格式泄漏，见 docs）：
+    - content: 恒为文本（str）。assistant 的工具调用不塞 content——
+      放 meta["tool_calls"]（list of {call_id, tool_name, arguments}）；
+      tool 结果放 meta["tool_call_id"]（关联 call_id）。
+    - meta: 溯源/时间/结构化工具载荷。适配器把内部 Message 转 provider wire 格式
+      只发生在各自 _to_* 转换器（openai_compat._to_chat_message / ark._to_input），
+      不再把含 role/type 的 provider dict 塞进 content。
+    """
     role: Role
-    content: Any  # 字符串｜结构化内容｜工具载荷
-    meta: dict[str, Any] = field(default_factory=dict)  # 溯源、时间、标签等扩展信息
+    content: Any  # 恒为 str（文本）；保留 Any 供多模态/旧数据防御
+    meta: dict[str, Any] = field(default_factory=dict)  # 结构化工具载荷(tool_calls/tool_call_id)+ 溯源标签
+
+    @property
+    def tool_calls(self) -> list[dict]:
+        """assistant 消息的结构化 tool_calls（meta 存，无则空）。"""
+        return self.meta.get("tool_calls", []) if self.role == "assistant" else []
+
+    @property
+    def tool_call_id(self) -> str | None:
+        """tool 消息关联的 call_id（meta 存；非 tool 消息 None）。"""
+        return self.meta.get("tool_call_id") if self.role == "tool" else None
 
 @dataclass
 class ContentBlock:
