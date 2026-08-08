@@ -227,13 +227,14 @@ def test_handoff_dedup_terminates():
 # ---- 测试:后台 subagent(commit 9)----
 
 def test_background_subagent_notification():
-    """run_subagent_background 完成 -> notify_queue 收到 (role, final_text)。"""
+    """run_subagent_background 完成 -> notify_queue 收到 (role, final_text, status)。"""
     rt = _ctx([ModelResponse(text="bg result")])
     worker = WorkerAgent(role="search", tools=[], config=rt.config, runtime=rt)
     q: asyncio.Queue = asyncio.Queue()
     asyncio.run(run_subagent_background(worker, "找 X", q))
-    role, text = q.get_nowait()
+    role, text, status = q.get_nowait()
     assert role == "search" and text == "bg result"
+    assert status == "completed", status
 
 
 def test_background_contextvar_isolation():
@@ -265,8 +266,9 @@ def test_orchestrator_launch_background():
         sw = WorkerAgent(role="search", tools=[], config=rt.config, runtime=rt)
         orch = OrchestratorAgent(runtime=rt, workers=[sw])
         await orch.launch_background("search", "t")
-        role, text = q.get_nowait()
+        role, text, status = q.get_nowait()
         assert role == "search" and text == "orch bg"
+        assert status == "completed", status
     asyncio.run(run())
 
 
@@ -364,9 +366,10 @@ def test_task_tool_background():
         r = await _run_subagent(request, ctx)
         assert "已后台派出" in (r.text or ""), r.text
         # 主 agent 没等;子 agent 后台跑完 -> notify_queue 收到(await q.get 期间子 agent 在 loop 上跑)
-        role, text = await q.get()
+        role, text, status = await q.get()
         assert role == "subagent"
         assert text == "subagent result"
+        assert status == "completed", status
 
     asyncio.run(run())
 

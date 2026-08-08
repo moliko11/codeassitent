@@ -13,6 +13,7 @@ from typing import Any, TextIO
 
 from .sink import EventSink
 from .events import TextDelta, ThinkingDelta, ToolStart, ToolEnd, RunEnd
+from ..tools import _runtime_state
 
 # ANSI 颜色（Win10+ 原生支持；use_color=False 时降级为纯文本，避免乱码）
 _CYAN = "\033[36m"
@@ -72,6 +73,12 @@ class StreamingPrinter(EventSink):
             self._in_text = False
 
     def emit(self, event) -> None:
+        # 子 agent 事件不渲染到主终端(REPL):Agent.run 设了 _runtime_state.agent_id(role),
+        # 主 agent/单 agent 是 None。子 agent 工具过程只在后台跑,结果经 tool_result/[task-notification]
+        # 回灌主 agent;若在这里打印会混入主 REPL 输出、甚至撞 `User: ` prompt(曾实测 `User:   ⎿ ok {...}`)。
+        # sink 链路保留,故 trace/SSE 仍收到子 agent 事件(带 agent_id,供监控/web 展示)。
+        if _runtime_state.agent_id.get() is not None:
+            return
         match event:
             case TextDelta(text):
                 # 不换行逐字输出 -> 打字机效果（最终回答,始终可见,不受 expose_reasoning 影响）

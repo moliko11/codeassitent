@@ -388,14 +388,19 @@ class ToolExecutor:
             async with sem:
                 # CC canUseTool 同款:执行前 async 权限门(whitelist/git/high_risk)。
                 # deny 不回填 execute,直接产 GuardrailBlocked ToolResult(模型下轮看到"未获确认")。
+                # elapsed_ms 实测整个 run_one(含权限门/重试),修 ToolEnd/ToolResultMessage 恒 0。
+                t0 = time.perf_counter()
                 perm = await self.can_use_tool(c)
                 if not perm.allowed:
-                    return self._finalize(ToolResult(
+                    r = self._finalize(ToolResult(
                         call_id=c.call_id, tool_name=c.tool_name, ok=False,
                         error={"type": "GuardrailBlocked", "message": perm.reason,
                                "retryable": False}, meta=c.meta))
-                return await asyncio.to_thread(self.execute, c, timeout=timeout,
-                                               cancel_event=cancel_event, user_id=user_id)
+                else:
+                    r = await asyncio.to_thread(self.execute, c, timeout=timeout,
+                                                cancel_event=cancel_event, user_id=user_id)
+                r.elapsed_ms = (time.perf_counter() - t0) * 1000
+                return r
 
         tasks = [asyncio.ensure_future(run_one(c)) for c in calls]
         try:
@@ -406,7 +411,8 @@ class ToolExecutor:
                         call_id=r.call_id, tool_name=r.tool_name, ok=r.ok,
                         error_type=(r.error or {}).get("type") if r.error else None,
                         summary=_result_summary(r, limit=self.result_summary_chars),
-                        attempts=(r.meta or {}).get("attempts", 1)))
+                        attempts=(r.meta or {}).get("attempts", 1),
+                        elapsed_ms=r.elapsed_ms))
                 yield r
         except asyncio.CancelledError:
             for t in tasks:

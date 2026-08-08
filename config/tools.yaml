@@ -1,6 +1,7 @@
 bash:
   default_timeout: 30         # BashTool 默认超时(秒)
 web_fetch:
+  enabled: false              # 2026-08-07 禁用:每次额外 LLM 提取(慢)+ 实测易失败(17 次失败 7 次),见 docs/topics/session-issue-analysis.md
   timeout: 30                 # httpx 超时(秒)
   max_chars: 8000             # 内容转 markdown 后截断字符数
 web_search:

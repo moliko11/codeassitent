@@ -7,7 +7,7 @@
 # subagent 在自己的 context copy 里跑,model_adapter/workspace/current_step_id 不污染父(对标 CC AsyncLocalStorage)。
 import asyncio
 
-from .agent import Agent
+from .agent import Agent, subagent_result_text, subagent_status
 
 
 # 持强引用防 fire-and-forget Task 被 GC 取消(asyncio 已知坑:create_task 返回的 Task 不持引用会被回收)
@@ -15,14 +15,17 @@ _background_tasks: set = set()
 
 
 async def run_subagent_background(agent: Agent, task: str, notify_queue: asyncio.Queue) -> None:
-    """跑一个 subagent,完成时把 (role, final_text) put 到 notify_queue。
+    """跑一个 subagent,完成时把 (role, final_text, status) put 到 notify_queue。
 
     通常用 launch_background_subagent 包成 asyncio.create_task fire-and-forget;
     直接 await 则等价于串行 subagent(失去后台语义,但便于测试)。
+
+    final_text 有 final_response 用其文本,未完成用 subagent_result_text 的失败原因;
+    status 用 subagent_status(completed/failed/stopped,对齐 CC 通知 <status>),
+    主 agent 收到 [task-notification] 即知子 agent 成败,自行兜底,不再等空结果。
     """
     state = await agent.run(task)
-    text = getattr(state.final_response, "text", "") if state.final_response else ""
-    await notify_queue.put((agent.role, text))
+    await notify_queue.put((agent.role, subagent_result_text(state), subagent_status(state)))
 
 
 def launch_background_subagent(agent: Agent, task: str, notify_queue: asyncio.Queue) -> asyncio.Task:

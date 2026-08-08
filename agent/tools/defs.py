@@ -49,4 +49,5 @@ class ToolResult:
     error: dict[str, Any] | None = None     # 调用错误信息
     meta: dict[str, Any] = field(default_factory=dict)   # 元数据
     text: str | None = None  # 调用结果文本
+    elapsed_ms: float = 0.0  # 实际耗时(_parallel.run_one 实测;修 ToolEnd/ToolResultMessage 恒 0)
 

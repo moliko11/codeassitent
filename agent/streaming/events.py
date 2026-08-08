@@ -1,15 +1,59 @@
 # 流式事件：Agent 运行过程中向 EventSink 推送的事件类型。
 #
-# 分两层（对应 claude-code 的双层事件模型）：
+# 三层（对应 claude-code 的双层事件模型，2026-08-08 对齐 CC 源码）：
 # - 低层（adapter 发）：TextDelta / ToolCallStart / ToolCallDelta / ToolCallEnd / MessageEnd
-#   —— 对应 LLM 流式输出的增量（逐 token 文本、工具参数 JSON 增量）。
+#   —— LLM 流式输出增量（逐 token 文本、工具参数 JSON 增量）。仅 CLI 打字机消费。
 # - 高层（loop / executor 发）：RunStart / StepStart / ToolStart / ToolEnd / StepEnd / RunEnd
-#   —— 对应 Agent 生命周期与工具执行进度。
+#   —— Agent 生命周期与工具执行进度。
+# - 消息级（loop 源头发）：AssistantMessage / ToolResultMessage
+#   —— 完整 assistant 消息与工具结果，数据在 ModelResponse/ToolResult 处已齐，
+#      直接发整包（对齐 CC QueryEngine 的 `assistant`/`user(tool_result)`，不做 delta 聚合）。
+#      这是 web/SSE 消费的契约（server.py _is_web_event 白名单）；delta 只在 CLI 打字机用。
 #
 # 设计：frozen dataclass + StreamEvent Union；sink 用 match(event) 分发。
 # 事件层不依赖 state / models / adapters，保持叶子层（与 enums 同级）。
 from dataclasses import dataclass
 from typing import Any, Union
+
+
+# ─────────────────── 消息级：完整内容（loop 源头发，web 契约） ───────────────────
+
+@dataclass(frozen=True)
+class AssistantMessage:
+    """一条完整的 assistant 消息（对齐 CC `assistant`）。
+
+    _run_steps 拿到完整 ModelResponse（text/thinking/tool_calls/usage 全量）时源头发，
+    不做 delta 聚合。tool_calls 是已解析 dict 列表 {call_id, tool_name, arguments}。
+    uuid 全程带（前端去重/关联，对齐 CC）；agent_id 打标子 agent（多 Agent 展示用）。
+    """
+    run_id: str
+    uuid: str
+    agent_id: str | None = None
+    step_index: int | None = None
+    text: str = ""
+    thinking: str = ""
+    tool_calls: tuple = ()      # tuple[dict]: {call_id, tool_name, arguments}
+    stop_reason: str | None = None
+    usage: Any = None           # TokenUsage；用 Any 避免事件层反向依赖 models
+
+
+@dataclass(frozen=True)
+class ToolResultMessage:
+    """一条完整工具结果（对齐 CC `user` 的 tool_result 块）。
+
+    工具结果就绪处（_run_steps/_run_workflow/_execute_pending 的 async-for）源头发。
+    elapsed_ms 由 ToolResult.elapsed_ms 传入（_parallel.run_one 实测，修待办 C 恒 0）。
+    """
+    run_id: str
+    uuid: str
+    call_id: str
+    tool_name: str
+    ok: bool
+    summary: str | None = None
+    elapsed_ms: float = 0.0
+    attempts: int = 1
+    error_type: str | None = None
+    agent_id: str | None = None
 
 
 # ─────────────────── 高层：生命周期（loop / executor 发） ───────────────────
@@ -118,6 +162,8 @@ class MessageEnd:
 
 
 StreamEvent = Union[
+    # 消息级（web 契约）
+    AssistantMessage, ToolResultMessage,
     # 高层
     RunStart, StepStart, StepEnd, RunEnd, ToolStart, ToolEnd, ApprovalRequestEvent,
     # 低层

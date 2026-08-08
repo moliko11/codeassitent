@@ -19,6 +19,8 @@ def _ser(obj: Any) -> Any:
         return {k: _ser(v) for k, v in vars(obj).items() if k != "raw"}
     if isinstance(obj, list):
         return [_ser(x) for x in obj]
+    if isinstance(obj, tuple):
+        return [_ser(x) for x in obj]   # AssistantMessage.tool_calls 是 tuple[dict],序列化要展平
     if isinstance(obj, dict):
         return {k: _ser(v) for k, v in obj.items()}
     return obj

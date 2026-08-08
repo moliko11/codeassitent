@@ -9,7 +9,7 @@ breaker:                      # BreakerConfig(breaker.py)
   half_open_max: 1
 execution:                    # ToolExecutor 装配参数(registry.py)
   retry_mode: runtime_retry   # 主入口装配默认(库级 ToolExecutor 默认仍 llm_retry)
-  parallel_semaphore: 8       # _parallel asyncio.Semaphore
+  parallel_semaphore: 10      # _parallel asyncio.Semaphore(2026-08-07: 8→10,提示词引导一次发 5-7 个并行调用)
   max_workers: 1              # _run_with_timeout ThreadPoolExecutor
   result_summary_chars: 4000  # _result_summary 截断(Phase 2 §2.4:桌面 xterm 渲染 Bash 输出,80 太少)
 audit:                        # AuditLogger

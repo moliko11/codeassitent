@@ -30,6 +30,11 @@ export const apiChat = (sessionId: string, input: string, signal: AbortSignal) =
 export const apiMessages = (sessionId: string) =>
   fetch(`${AGENT_API}/sessions/${sessionId}/messages`);
 
+// 后台自动 turn 事件长轮询(待办 A):GET /sessions/:id/events?timeout=20
+// 后台 subagent 完成 -> 后端 session loop 自动起一轮 turn,事件缓冲;前端空闲时 long-poll 拉取。
+export const apiEvents = (sessionId: string, signal?: AbortSignal) =>
+  fetch(`${AGENT_API}/sessions/${sessionId}/events?timeout=20`, { signal });
+
 export const apiRename = (sessionId: string, title: string) =>
   fetch(`${AGENT_API}/sessions/${sessionId}/rename`, {
     method: "POST",

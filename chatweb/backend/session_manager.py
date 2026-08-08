@@ -4,6 +4,7 @@
 # 直接用会丢上下文。所以 web 不调 agentloop,改调 _run_turn(agentloop.py:274,单轮体不收尾),
 # 由 SessionManager 管 session 级状态:一个 chat session = 一个 run_id(共享 transcript,跨轮 append)。
 # 等价于把 REPL 的 _do_turn(agentloop.py:553)HTTP 化。见 chat-template-integration §3。
+import asyncio
 import json
 import time
 import uuid
@@ -17,7 +18,14 @@ from agent.tracing import Tracer, TraceStore
 
 @dataclass
 class SessionState:
-    """一个 chat session 的跨轮状态(adapter/registry/tool_executor 跨 session 共享,这里只存 per-session)。"""
+    """一个 chat session 的跨轮状态(adapter/registry/tool_executor 跨 session 共享,这里只存 per-session)。
+
+    后台通知闭环(待办 A,对齐 CC 命令队列 + processQueueIfReady):
+    - notify_queue:后台 subagent 完成通知通道(put (role, text, status));`_session_loop` 是唯一消费者,
+      通知到达即自动起一轮 turn(CC:空闲自动处理,不等用户下次发消息)
+    - turn_lock:turn 串行化(用户 turn vs 自动 turn,对齐 CC queryGuard 单占位;用户输入优先)
+    - event_queue:自动 turn 的事件缓冲(web 无 REPL 循环,前端 long-poll GET /sessions/{id}/events 拉)
+    """
     run_id: str
     messages: list  # 跨轮累积上下文(内存共享 list,同 REPL run_agent_loop L545)
     persister: Persister          # append 模式,跨轮不 close(session 关闭才 close)
@@ -25,8 +33,14 @@ class SessionState:
     created_at: float = field(default_factory=time.time)
     title: str = ""               # Phase 1 §1.1:会话标题(首轮自动推导,前端可重命名,覆写 run_meta)
     file_history: Optional[object] = None   # Phase 2 §2.5:跨轮复用的 FileHistory(桌面 diff 数据源)
+    notify_queue: asyncio.Queue = field(default_factory=asyncio.Queue)   # 后台 subagent 完成通知通道
+    event_queue: asyncio.Queue = field(default_factory=asyncio.Queue)    # 自动 turn 事件缓冲(前端 /events 拉)
+    turn_lock: asyncio.Lock = field(default_factory=asyncio.Lock)        # turn 串行(用户/自动互斥,CC queryGuard)
+    loop_task: Optional[asyncio.Task] = None   # 会话级通知消费者 loop(server _start_session_loop 挂)
 
     def close(self):
+        if self.loop_task is not None:
+            self.loop_task.cancel()
         self.persister.close()
 
 

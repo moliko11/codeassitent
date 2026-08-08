@@ -4,6 +4,7 @@
 # UI 层（StreamingPrinter）只实现一个接口即可渲染。详见 docs/topics/streaming-dev-plan.md。
 from .events import (
     StreamEvent,
+    AssistantMessage, ToolResultMessage,
     RunStart, StepStart, StepEnd, RunEnd, ToolStart, ToolEnd,
     TextDelta, ToolCallStart, ToolCallDelta, ToolCallEnd, MessageEnd,
 )
@@ -11,6 +12,7 @@ from .sink import EventSink, NullSink, CompositeSink
 
 __all__ = [
     "StreamEvent",
+    "AssistantMessage", "ToolResultMessage",
     "RunStart", "StepStart", "StepEnd", "RunEnd", "ToolStart", "ToolEnd",
     "TextDelta", "ToolCallStart", "ToolCallDelta", "ToolCallEnd", "MessageEnd",
     "EventSink", "NullSink", "CompositeSink",

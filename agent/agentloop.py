@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 import asyncio
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
@@ -38,6 +39,7 @@ from .context.auto_compact import make_summarizer
 from .utils.fileHistory import FileHistory
 from .persist.paths import run_dir
 from .tools import _runtime_state
+from .tools.settings import t as _tool_cfg
 
 
 def _track_edit_callback(call):
@@ -68,6 +70,46 @@ def _init_file_history(run_id: str, persist: bool):
     _runtime_state.file_history.set(FileHistory(run_dir(run_id) / "file-history"))
 
 
+def _emit_assistant_message(sink, state, model_response, step):
+    """源头发完整 assistant 消息(对齐 CC `assistant`):ModelResponse 已全量,不做 delta 聚合。
+
+    数据就绪点:stream_llm 返回后(此处 text/thinking/tool_calls/usage/stop_reason 全在)。
+    tool_calls 转纯 dict(事件层不反向依赖 ToolCall);agent_id 打标(子 agent 可区分)。
+    """
+    from .streaming.events import AssistantMessage
+    tool_calls = tuple({
+        "call_id": tc.call_id, "tool_name": tc.tool_name, "arguments": tc.arguments,
+    } for tc in (model_response.tool_calls or []))
+    sink.emit(AssistantMessage(
+        run_id=state.run_id, uuid=str(uuid.uuid4()),
+        agent_id=_runtime_state.agent_id.get(),
+        step_index=step.index,
+        text=model_response.text or "",
+        thinking=model_response.thinking or "",
+        tool_calls=tool_calls,
+        stop_reason=model_response.stop_reason,
+        usage=model_response.usage,
+    ))
+
+
+def _emit_tool_result_message(sink, state, r):
+    """源头发完整工具结果(对齐 CC `user` 的 tool_result 块):ToolResult 就绪即发。
+
+    在 async-for 逐 result 处调(含 subagent 替换后的最终 r)。elapsed_ms 由
+    _parallel.run_one 实测填入 ToolResult(ToolEnd 同源,修待办 C 恒 0)。
+    """
+    from .streaming.events import ToolResultMessage
+    sink.emit(ToolResultMessage(
+        run_id=state.run_id, uuid=str(uuid.uuid4()),
+        call_id=r.call_id, tool_name=r.tool_name, ok=r.ok,
+        summary=(r.text or "")[:300] or None,
+        elapsed_ms=getattr(r, "elapsed_ms", 0.0),
+        attempts=(r.meta or {}).get("attempts", 1),
+        error_type=(r.error or {}).get("type") if r.error else None,
+        agent_id=_runtime_state.agent_id.get(),
+    ))
+
+
 async def _run_steps(state: AgentState, context: RuntimeContext, persister, subtask: bool = False):
     """Agent 主循环体（共享给 agentloop 正常 run / continue_loop 续跑 / plan_execute 子任务）。
     假设 state.messages 已初始化（正常 run 由 agentloop 初始化；resume 由 resume() 重建）。
@@ -78,13 +120,19 @@ async def _run_steps(state: AgentState, context: RuntimeContext, persister, subt
     loop_detector = LoopDetector(threshold=config.soft_stop_threshold)
     all_tools = context.registry.list_tools()
     allowed = config.allowed_tools
+    # 按 tools.yaml <name>.enabled 过滤(默认 true);web_fetch.enabled=false 时不给模型看到/调用。
+    # configure_tools 未调(测试)时 _CFG=None -> 全回落 True,行为不变。
+    def _tool_enabled(name: str) -> bool:
+        return bool(_tool_cfg(f"{name}.enabled", True))
     if allowed:
         # 白名单:只给模型看 allowed_tools 内的工具(权限隔离,题16;commit 10)
-        tools = [t.tool_spec for t in all_tools if t.tool_spec.name in allowed]
+        tools = [t.tool_spec for t in all_tools
+                 if t.tool_spec.name in allowed and _tool_enabled(t.tool_spec.name)]
     else:
         # 空=全允许(单 agent 默认);但 handoff 是特权工具(orchestrator 委派用),不自动放开,
         # 防子 agent 递归调子 agent(子 agent 无权再 handoff)。单 agent 不注册 handoff,此处无影响。
-        tools = [t.tool_spec for t in all_tools if t.tool_spec.name != "handoff"]
+        tools = [t.tool_spec for t in all_tools
+                 if t.tool_spec.name != "handoff" and _tool_enabled(t.tool_spec.name)]
 
      # 阶段 6：ContextBuilder(调 LLM 前组装 messages 的入口，对齐 cc query.ts:365 的管线入口)。
     # context_builder 未注入时从 config 现场构造；超 budget 只 print 到 stderr 告警，不裁剪。
@@ -130,6 +178,9 @@ async def _run_steps(state: AgentState, context: RuntimeContext, persister, subt
                 if _gr.action == "sanitize" and _gr.sanitized is not None:
                     model_response.text = _gr.sanitized
 
+            # 源头发完整 assistant 消息(对齐 CC `assistant`;web 契约,delta 只在 CLI 打字机)
+            _emit_assistant_message(sink, state, model_response, step)
+
             # durability-first：先落盘（decide 前，FINISH/tool_call 两路都保住付费 LLM 回复;此处已脱敏）
             if persister:
                 persister.log_assistant(model_response)
@@ -166,6 +217,7 @@ async def _run_steps(state: AgentState, context: RuntimeContext, persister, subt
                 # HITL(阶段0 Phase A):权限拒绝在 execute_many 内已回填 GuardrailBlocked ToolResult,
                 # 走正常 tool_result 回灌(模型下轮看到"未获确认"换方法)。waiting_approval 态留给
                 # Phase B 持久化挂起(mobile/云,resume 续跑)。
+                _emit_tool_result_message(sink, state, r)   # 源头发完整工具结果(web 契约)
                 if persister:
                     persister.log_tool_result(r)
                 state.messages = context.model_adapter.append_tool_result(state.messages, r)
@@ -244,10 +296,12 @@ async def _run_subagent(request, context: RuntimeContext, persister=None) -> Too
     经 notify_queue -> [task-notification] 下轮注入(主 agent 不阻塞,继续做别的)。默认前台阻塞。
     """
     from dataclasses import replace
-    from .multiagent.agent import Agent
+    from .multiagent.agent import Agent, subagent_result_text
     prompt = request.data["prompt"]
     background = request.data.get("background", False)
-    # fresh runtime(空 state)-> 子 agent 不继承父 messages,只看自己的 prompt(对标 CC 子 agent 隔离)
+    # fresh runtime(空 state)-> 子 agent 不继承父 messages,只看自己的 prompt(对标 CC 子 agent 隔离)。
+    # 子 agent 事件不打印由 StreamingPrinter 过滤(_runtime_state.agent_id 非 None 即跳过),sink 链路保留:
+    # 子 agent span 照常进 tracer/主 trace(带 agent_id),web SSE 也能收到(待办 E 前端有序渲染)。
     fresh_runtime = replace(context, state=AgentState())
     sub_agent = Agent(role="subagent", tools=[], config=context.config, runtime=fresh_runtime)
 
@@ -272,7 +326,8 @@ async def _run_subagent(request, context: RuntimeContext, persister=None) -> Too
     finally:
         if persister is not None:
             persister.agent_id = None
-    text = getattr(sub_state.final_response, "text", "") if sub_state.final_response else ""
+    # 有 final_response 用其文本;撞 max_steps/异常则回填失败原因,主 agent 读了自行兜底(不再拿空结果卡住)
+    text = subagent_result_text(sub_state)
     return ToolResult(call_id=request.call_id, tool_name="task", ok=True,
                       data={"description": request.data.get("description", ""), "result": text},
                       text=text, meta=request.meta)
@@ -356,6 +411,7 @@ async def _run_workflow(state: AgentState, context: RuntimeContext, persister):
         return state
     state.transition("waiting_tool")
     async for r in context.tool_executor.execute_many(calls, timeout=config.step_timeout, sink=sink):
+        _emit_tool_result_message(sink, state, r)   # 源头发完整工具结果(web 契约)
         if persister:
             persister.log_tool_result(r)
         state.messages = context.model_adapter.append_tool_result(state.messages, r)
@@ -497,6 +553,7 @@ async def _execute_pending(state: AgentState, context: RuntimeContext, persister
         state.transition("running")        # created -> running（resume 后可能仍是 created）
     state.transition("waiting_tool")
     async for r in context.tool_executor.execute_many(pending, timeout=config.step_timeout, sink=sink):
+        _emit_tool_result_message(sink, state, r)   # 源头发完整工具结果(web 契约)
         if persister:
             persister.log_tool_result(r)
         state.messages = context.model_adapter.append_tool_result(state.messages, r)
@@ -638,21 +695,60 @@ async def run_agent_loop(registry: ToolRegistry,
         last_state = state
         return state
 
+    input_task: Optional[asyncio.Task] = None   # 跨轮复用,不 cancel(线程池 input 无法取消)
+    input_prompt_shown = False   # 当前输出行是否以未换行的 "User: " 提示结尾;任何后续输出前需补换行
+
+    async def _handle_notification(role: str, text: str, status: str) -> None:
+        """注入一条后台 subagent 完成通知,让主 agent 读子 agent 结果并整合。
+
+        通知必须以消息形式注入(模型要读到子 agent 结果,对齐 CC messageQueueManager);
+        这里在 turn 前打印系统提示行,与真实用户输入区分。status 带结构化成败
+        (completed/failed/stopped,对齐 CC 通知 <status>),主 agent 一眼知道子 agent 结果。
+        处理完若用户还没输入(还在等 prompt),重打一个 "User: " 提示——原 prompt 被
+        流式输出顶走,不提示的话用户不知现在能输入,会傻等或按回车试探
+        (产生空 user 消息,主 agent 还对着空消息回复一轮)。
+        """
+        nonlocal input_prompt_shown
+        if input_prompt_shown:
+            print()   # 上一行是未换行的 "User: ",先补换行,避免 [后台任务]/流式输出打同一行
+            input_prompt_shown = False
+        print(f"  [后台任务] {role} 完成(status={status}),已注入主 agent 处理…")
+        await _do_turn(f"[task-notification] {role} 完成(status={status}):\n{text}")
+        if input_task is not None and not input_task.done():
+            print("User: ", end="", flush=True)   # 重打 prompt(无换行),标记行未结束
+            input_prompt_shown = True
+
     try:
         while True:
             # 1. 排干后台 subagent notification(作为 user 消息注入,对标 CC messageQueueManager)。
             #    notification 不读 input,直接进 turn 让 agent 处理后台 subagent 的结果。
             while not notify_queue.empty():
-                role, text = notify_queue.get_nowait()
-                await _do_turn(f"[task-notification] {role} 完成:\n{text}")
-            # 2. 读用户输入(非阻塞:input 丢线程池,不卡事件循环,后台 subagent 可并发 put)。
-            #    注:notification 若在 _ainput 期间到达,下一轮迭代顶部排干时处理
-            #    (响应性留 TODO:可 race input vs notify_queue.get 提前唤醒)。
-            user_input = await _ainput("User: ")
-            if user_input.lower() in set(exit_words()):   # 退出词走 agent.yaml(缺省 exit/quit)
-                print("Exiting agent loop.")
-                break
-            await _do_turn(user_input)
+                role, text, status = notify_queue.get_nowait()
+                await _handle_notification(role, text, status)
+            # 2. 竞速:用户输入 vs 新通知(对标 CC 命令队列非空即自动处理)。
+            #    通知到达即自动触发新 turn(不用按回车);input_task 跨轮复用绝不 cancel
+            #    (线程池 input() 无法取消,重复 create 会并发读 stdin 抢输入);
+            #    break 只发生在 input_task done(用户输入退出词),此时无 pending 输入线程。
+            if input_task is None:
+                input_task = asyncio.create_task(_ainput("User: "))
+                input_prompt_shown = True   # prompt 显示中(阻塞等输入),行未结束
+            notify_task = asyncio.create_task(notify_queue.get())
+            done, _ = await asyncio.wait(
+                {input_task, notify_task}, return_when=asyncio.FIRST_COMPLETED)
+            if notify_task not in done:
+                notify_task.cancel()          # 输入先到:取消通知等待
+            if notify_task in done:
+                role, text, status = notify_task.result()
+                await _handle_notification(role, text, status)
+            if input_task in done:
+                user_input = input_task.result()
+                input_task = None             # 重建下一轮输入
+                input_prompt_shown = False    # 用户按了回车,"User: " 行已结束
+                if user_input.lower() in set(exit_words()):   # 退出词走 agent.yaml(缺省 exit/quit)
+                    print("Exiting agent loop.")
+                    break
+                if user_input.strip():        # 空输入(只按回车)忽略:回等待,不产生空 user 消息
+                    await _do_turn(user_input)
         # session 正常退出：写 run_end（用最后一轮 status）；崩在 finally 前则不写 -> resume 续跑
         if last_state is not None:
             persister.log_run_end(last_state.status, last_state.error)

@@ -34,7 +34,10 @@ from agent.core.workspace import Workspace
 from agent.runtime import RuntimeContext
 from agent.streaming.sink import CompositeSink
 from agent.streaming.sse_sink import SSESink
-from agent.streaming.events import RunStart, RunEnd, StreamEvent
+from agent.streaming.events import (
+    RunStart, RunEnd, StreamEvent, AssistantMessage, ToolResultMessage, ToolStart,
+    ApprovalRequestEvent,
+)
 from agent.tracing import Tracer, TraceStore
 from agent.tracing.metrics import MetricsCollector
 from agent.persist.paths import memory_dir, PERSIST_ROOT, run_dir
@@ -117,6 +120,7 @@ def ensure_session(run_id: str) -> SessionState | None:
         file_history=make_file_history(run_id),    # Phase 2 §2.5:重建 FileHistory(含 sidecar 恢复)
     )
     session_manager._sessions[run_id] = sess  # 缓存,warm path 下次直接命中
+    _start_session_loop(sess)   # 后台通知消费者(待办 A;resume 的 session 也要能收子 agent 通知)
     return sess
 
 
@@ -138,11 +142,97 @@ def build_runtime_context(state: AgentState, sink, tracer: Tracer, notify_queue:
     )
 
 
+# ─────────────────── 后台通知闭环(待办 A,对齐 CC 命令队列 + processQueueIfReady)───────────────────
+# web 没有 REPL 那个"活着的循环"(CLI 靠 run_agent_loop 的 while + asyncio.wait 竞速自动起 turn),
+# 所以用一个 session 级消费者 loop 补上:_session_loop 消费 sess.notify_queue(唯一消费者,
+# 天然 exactly-once),通知到达 -> 等 turn_lock(用户 turn 优先,CC 优先级 next > later)->
+# 自动起一轮 _run_turn(合成 [task-notification] user 消息让主 agent 读子 agent 结果)。
+# 事件经 per-turn SSESink -> sess.event_queue,前端 long-poll GET /sessions/{id}/events 拉(无持久 SSE)。
+
+
+async def _run_auto_turn(sess: SessionState, notification: str):
+    """自动 turn:合成 user 消息跑 _run_turn,事件缓冲进 sess.event_queue(对齐 REPL _handle_notification)。
+    HITL 照常走 web_confirmer(set_active_sse_queue 指向本 turn 的队列 -> ApprovalRequestEvent 也进
+    event_queue,前端 /events 拉到后弹窗,POST /approve 解 future)。"""
+    q: asyncio.Queue = asyncio.Queue()
+    set_active_sse_queue(q)
+    sse_sink = SSESink(q)
+    sink = CompositeSink(sse_sink, sess.tracer)   # 事件同时进本 turn 队列 + tracer(同 turn())
+    state = AgentState(run_id=sess.run_id, max_steps=_config.max_steps, messages=sess.messages)
+    state.session_id = sess.run_id
+    ctx = build_runtime_context(state=state, sink=sink, tracer=sess.tracer, notify_queue=sess.notify_queue)
+    _runtime_state.model_adapter.set(_adapter)
+    _runtime_state.workspace.set(_workspace)
+    _runtime_state.file_history.set(sess.file_history)
+    try:
+        await _run_turn(notification, state, ctx, sess.persister)
+    except Exception as e:
+        state.fail({"type": "AutoTurnError", "message": str(e)})
+    finally:
+        _emit_run_end(state, sink)
+        # 本 turn 事件 -> session 事件缓冲(只搬 web 白名单,前端能消费)。RunEnd 是完整边界。
+        while not q.empty():
+            ev = q.get_nowait()
+            if _is_web_event(ev):
+                sess.event_queue.put_nowait(ev)
+        # 同步跨轮上下文 + 标题 + 增量落盘 run_meta(同 turn() 的 gen finally)
+        sess.messages = state.messages
+        if not sess.title:
+            sess.title = _first_user_title(state.messages)
+        try:
+            rep = MetricsCollector().collect(sess.tracer.trace)
+            _write_run_meta(state, rep, _config.model, title=sess.title or None)
+        except Exception:
+            pass
+
+
+async def _session_loop(sess: SessionState, run_auto_turn=None):
+    """session 级通知消费者(等价 CC processQueueIfReady 的空闲自动处理 + 用户输入优先)。
+
+    只消费 sess.notify_queue(唯一消费者 -> 通知只出队一次,不会和用户 turn 重复注入)。
+    通知到达 -> 等 turn_lock(用户 turn 在跑就等着,CC 'next' > 'later' 的用户输入优先)->
+    自动起一轮新 turn 处理。loop 随 session close 取消。
+    """
+    if run_auto_turn is None:
+        run_auto_turn = _run_auto_turn
+    try:
+        while True:
+            role, text, status = await sess.notify_queue.get()
+            async with sess.turn_lock:
+                try:
+                    await run_auto_turn(
+                        sess, f"[task-notification] {role} 完成(status={status}):\n{text}")
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pass   # 单次自动 turn 失败不杀 loop(状态已 fail,run_meta 照落)
+    except asyncio.CancelledError:
+        pass
+
+
+def _start_session_loop(sess: SessionState):
+    """在 session 上挂通知消费者 loop(幂等)。须在 running event loop 内调用(create/ensure 都是 async)。"""
+    if sess.loop_task is None or sess.loop_task.done():
+        sess.loop_task = asyncio.create_task(_session_loop(sess))
+
+
 def _event_to_dict(ev: StreamEvent) -> dict:
     """事件 -> JSON dict,加 `type` 标签(前端 reducer 按它分发)。用 _ser 跳 raw(同 transcript)。"""
     d = _ser(ev)
     d["type"] = type(ev).__name__
     return d
+
+
+def _is_web_event(ev: StreamEvent) -> bool:
+    """web/SSE 消费白名单(对齐 CC:web 只收消息级 + 生命周期框架,delta 只在 CLI 打字机)。
+
+    放行:消息级(AssistantMessage/ToolResultMessage)+ RunStart/RunEnd 书签 + ToolStart
+    (resume/_workflow 无 LLM step 时给前端建工具卡)+ HITL(ApprovalRequestEvent 不走 sink,直接入队)。
+    吞掉:TextDelta/ThinkingDelta/ToolCall*/ToolEnd/StepStart/StepEnd/MessageEnd(delta 与机制事件,
+    tracer/printer 已消费,web 无需)。前端由此拿到自包含的完整事件,不用再累积 delta。
+    """
+    return isinstance(ev, (RunStart, RunEnd, AssistantMessage, ToolResultMessage, ToolStart,
+                           ApprovalRequestEvent))
 
 
 # ─────────────────── FastAPI app ───────────────────
@@ -197,6 +287,7 @@ async def rename_session(run_id: str, body: RenameBody):
 async def create_session():
     """创建 chat session(= 新 run_id + 共享 messages + Persister append 模式)。"""
     sess = session_manager.create()
+    _start_session_loop(sess)   # 后台通知消费者(待办 A)
     return {"run_id": sess.run_id, "created_at": sess.created_at}
 
 
@@ -223,8 +314,9 @@ async def turn(run_id: str, body: TurnBody):
 
     state = AgentState(run_id=sess.run_id, max_steps=_config.max_steps, messages=sess.messages)
     state.session_id = sess.run_id
-    notify_queue: asyncio.Queue = asyncio.Queue()
-    ctx = build_runtime_context(state=state, sink=sink, tracer=sess.tracer, notify_queue=notify_queue)
+    # 待办 A:用 session 级 notify_queue(不是每轮新建一个没人 drain 的)——后台 subagent 完成
+    # 进 sess.notify_queue,_session_loop 排干后自动起 turn;用户 turn 与自动 turn 靠 turn_lock 串行。
+    ctx = build_runtime_context(state=state, sink=sink, tracer=sess.tracer, notify_queue=sess.notify_queue)
 
     # _runtime_state 注入(对齐 agentloop L496-498:_runtime_state 给 _run_steps 内的工具用)
     _runtime_state.model_adapter.set(_adapter)     # WebFetch 用
@@ -233,9 +325,16 @@ async def turn(run_id: str, body: TurnBody):
                                                         # _run_steps 每步末 make_snapshot + before_mutation 自动生效
 
     async def run_and_signal():
-        """跑 _run_turn,完成后发 RunEnd(对齐 REPL _do_turn 调 _emit_run_end)。"""
+        """跑 _run_turn,完成后发 RunEnd(对齐 REPL _do_turn 调 _emit_run_end)。
+        turn_lock:与 _session_loop 的自动 turn 串行(共享 sess.messages 不可并发 _run_turn)。
+        sess.messages 同步必须在锁内(_run_turn 里 append 返回 copy,state.messages 离开原 list):
+        否则锁释放后、gen() finally 同步前,自动 turn 会拿到过期上下文(待办 A 竞态)。"""
         try:
-            await _run_turn(body.input, state, ctx, sess.persister)
+            async with sess.turn_lock:
+                try:
+                    await _run_turn(body.input, state, ctx, sess.persister)
+                finally:
+                    sess.messages = state.messages   # 锁内同步,任何退出路径都 sync
         except Exception as e:
             state.fail({"type": "WebTurnError", "message": str(e)})
         finally:
@@ -247,13 +346,15 @@ async def turn(run_id: str, body: TurnBody):
         try:
             while True:
                 ev = await q.get()
+                if not _is_web_event(ev):
+                    continue   # delta/机制事件:CLI/tracer 已消费,web 无需(吞掉不转发)
                 yield f"data: {json.dumps(_event_to_dict(ev), ensure_ascii=False)}\n\n"
                 if isinstance(ev, RunEnd):
                     break
             await task
         finally:
-            # 同步跨轮上下文(append 返回 copy,state.messages 已离开原 list,同 REPL bug2 修复)
-            sess.messages = state.messages
+            # 跨轮上下文已在 run_and_signal 锁内同步(此处不再动:sess.messages 可能已被自动 turn
+            # 追加,再赋回 state.messages 会 clobber)。首轮标题 + 增量 run_meta 照落。
             # Phase 1 §1.1:首轮自动推导标题(仅当用户未重命名过;重命名过的用用户值,不被覆盖)
             if not sess.title:
                 sess.title = _first_user_title(state.messages)
@@ -281,6 +382,31 @@ async def get_session(run_id: str):
     if rep is None:
         raise HTTPException(status_code=404, detail="run not found")
     return rep.to_dict()
+
+
+@app.get("/sessions/{run_id}/events")
+async def get_session_events(run_id: str, timeout: float = 20.0):
+    """前端 long-poll(待办 A):拉后台自动 turn 的事件(后台 subagent 完成触发)。
+
+    用户 turn 事件仍走 per-turn POST SSE;这里是**自动 turn**(session loop 自发起的,没有 POST 触发)
+    的事件缓冲。无事件时 hold 至多 timeout 秒返回空数组(轮询续命)。返回完整自动 turn 块:
+    排空缓冲到第一个 RunEnd 为止,保证前端一次拿到一轮自包含事件。"""
+    sess = ensure_session(run_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="session not found")
+    events: list[dict] = []
+    try:
+        while not sess.event_queue.empty():
+            ev = sess.event_queue.get_nowait()
+            events.append(_event_to_dict(ev))
+            if isinstance(ev, RunEnd):
+                break   # 一轮完整自动 turn,返回让前端落状态
+        if not events:
+            ev = await asyncio.wait_for(sess.event_queue.get(), timeout=timeout)
+            events.append(_event_to_dict(ev))
+    except asyncio.TimeoutError:
+        pass
+    return events
 
 
 def _transcript_to_messages(run_id: str) -> list[dict]:

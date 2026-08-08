@@ -11,24 +11,24 @@ export interface TokenUsage {
 export interface ToolCallView {
   callId: string;
   toolName: string;
-  argumentsJson: string; // ToolCallDelta 累积的原始 JSON 串
-  arguments?: object;    // ToolCallEnd 后 parse
+  argumentsJson: string; // 序列化后的参数 JSON(消息级事件已解析,无需累积)
+  arguments?: object;    // 解析后的参数对象
   phase: "producing" | "running" | "done" | "error"; // 产参 -> 执行 -> 完成
   ok?: boolean;
-  summary?: string;      // ToolEnd.summary
-  elapsedMs?: number;
-  attempts?: number;     // ToolEnd.attempts(>1 表示重试过)
+  summary?: string;      // ToolResultMessage.summary
+  elapsedMs?: number;    // ToolResultMessage.elapsed_ms(实测)
+  attempts?: number;     // ToolResultMessage.attempts(>1 表示重试过)
   errorType?: string;    // Phase 1 §1.3:失败分类(ToolExecutionError/GuardrailBlocked/SchemaValidationError…)
-  errorMessage?: string; // Phase 1 §1.3:失败原因(历史恢复从 transcript error 拿,流式从 ToolEnd.error_type)
+  errorMessage?: string; // Phase 1 §1.3:失败原因(历史恢复从 transcript error 拿,流式从 ToolResultMessage)
 }
 
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
-  content: string;          // TextDelta 累积
-  thinking?: string;        // ThinkingDelta 累积(折叠展示)
+  content: string;          // AssistantMessage.text(整包,非累积)
+  thinking?: string;        // AssistantMessage.thinking(整包,折叠展示)
   toolCalls?: ToolCallView[];
-  usage?: TokenUsage;       // MessageEnd.usage
+  usage?: TokenUsage;       // AssistantMessage.usage(每 step 独立)
   streaming?: boolean;
   status?: "running" | "completed" | "failed";
   createdAt: number;
