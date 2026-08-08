@@ -14,6 +14,7 @@ from typing import Optional
 from agent.core.messages import Message
 from agent.persist.persister import Persister
 from agent.tracing import Tracer, TraceStore
+from agent.streaming.event_store import EventStore
 
 
 @dataclass
@@ -30,6 +31,7 @@ class SessionState:
     messages: list  # 跨轮累积上下文(内存共享 list,同 REPL run_agent_loop L545)
     persister: Persister          # append 模式,跨轮不 close(session 关闭才 close)
     tracer: Tracer                # 会话级 tracer(跨轮累积 span,每轮末落 run_meta)
+    event_store: Optional[EventStore] = None   # 会话级事件流落盘(web 契约事件 -> events.jsonl,跨轮 append)
     created_at: float = field(default_factory=time.time)
     title: str = ""               # Phase 1 §1.1:会话标题(首轮自动推导,前端可重命名,覆写 run_meta)
     file_history: Optional[object] = None   # Phase 2 §2.5:跨轮复用的 FileHistory(桌面 diff 数据源)
@@ -42,6 +44,8 @@ class SessionState:
         if self.loop_task is not None:
             self.loop_task.cancel()
         self.persister.close()
+        if self.event_store is not None:
+            self.event_store.close()
 
 
 def make_file_history(run_id: str):
@@ -98,6 +102,7 @@ class SessionManager:
             persister=Persister(run_id),
             tracer=Tracer(run_id, store=TraceStore(run_id)),
             file_history=make_file_history(run_id),   # Phase 2 §2.5:桌面 diff 数据源
+            event_store=EventStore(run_id),           # 事件流落盘:web 契约事件 -> events.jsonl
         )
         self._sessions[run_id] = sess
         return sess

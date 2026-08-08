@@ -471,12 +471,15 @@ def _emit_run_end(state: AgentState, sink):
     sink.emit(RunEnd(status=state.status, error=state.error, final_text=final_text,
                      usage=usage, duration_ms=duration_ms, num_steps=len(state.steps)))
 
-def _end_run(state: AgentState, sink, persister):
-    """单次调用收尾：发 RunEnd + log_run_end + close（agentloop / continue_loop 复用）。"""
+def _end_run(state: AgentState, sink, persister, event_store=None):
+    """单次调用收尾：发 RunEnd + log_run_end + close（agentloop / continue_loop 复用）。
+    event_store(可选):前端事件流落盘 sink,与 persister 同生命周期关闭。"""
     _emit_run_end(state, sink)
     if persister:
         persister.log_run_end(state.status, state.error)
         persister.close()
+    if event_store is not None:
+        event_store.close()
 
 def _first_user_title(messages, limit: int = 30) -> str:
     """从 messages 取首条真实 user 消息作会话 title(Phase 1 §1.1)。
@@ -590,6 +593,13 @@ async def continue_loop(state: AgentState, context: RuntimeContext) -> AgentStat
     先执行 pending（崩在工具执行中），再进主循环。Persister 以 append 模式复用同一 transcript。"""
     sink = context.sink
     persister = Persister(state.run_id) if context.persist else None
+    # 事件流落盘:resume 续跑也挂 EventStore(append 复用同一 events.jsonl)
+    event_store = None
+    if context.persist:
+        from .streaming.sink import CompositeSink
+        from .streaming.event_store import EventStore
+        event_store = EventStore(state.run_id)
+        sink = CompositeSink(sink, event_store)
     # 续跑也须初始化 _runtime_state(与 agentloop/run_agent_loop 入口对齐):
     # 否则 model_adapter/workspace/file_history 全 None -> WebFetch 坏、edit/write 跳权限校验、
     # 无备份/rewind、read_file_state 空 -> Edit 报"先读后改"(阶段5 验收 resume 涉文件任务必崩)。
@@ -602,7 +612,7 @@ async def continue_loop(state: AgentState, context: RuntimeContext) -> AgentStat
     state.step_index = 0
     await _execute_pending(state, context, persister)
     state = await _run_steps(state, context, persister)
-    _end_run(state, sink, persister)
+    _end_run(state, sink, persister, event_store=event_store)
     return state
 
 async def agentloop(user_input: str, context: RuntimeContext) -> AgentState:
@@ -615,6 +625,12 @@ async def agentloop(user_input: str, context: RuntimeContext) -> AgentState:
     from .tracing import Tracer, TraceStore
     tracer = Tracer(state.run_id, store=TraceStore(state.run_id) if context.persist else None)
     context.sink = CompositeSink(context.sink, tracer)
+    # 事件流落盘:persist 时挂 EventStore(web 契约事件 -> events.jsonl),与 transcript 同生命周期
+    event_store = None
+    if context.persist:
+        from .streaming.event_store import EventStore
+        event_store = EventStore(state.run_id)
+        context.sink = CompositeSink(context.sink, event_store)
     sink = context.sink
     persister = Persister(state.run_id) if context.persist else None
     if context.persist:
@@ -625,7 +641,7 @@ async def agentloop(user_input: str, context: RuntimeContext) -> AgentState:
 
     sink.emit(RunStart(run_id=state.run_id))
     state = await _run_turn(user_input, state, context, persister)
-    _end_run(state, sink, persister)
+    _end_run(state, sink, persister, event_store=event_store)
     # 阶段9:run 结束聚合 Metrics(打印到 stderr)
     from .tracing.metrics import MetricsCollector
     rep = MetricsCollector().collect(tracer.trace)
@@ -668,6 +684,8 @@ async def run_agent_loop(registry: ToolRegistry,
     from .streaming.sink import CompositeSink
     from .tracing import Tracer, TraceStore
     tracer = Tracer(session_run_id, store=TraceStore(session_run_id))
+    from .streaming.event_store import EventStore
+    event_store = EventStore(session_run_id)   # 事件流落盘:web 契约事件 -> events.jsonl(会话级,跨轮 append)
     messages: list = []               # 跨轮累积上下文（内存共享 list）
     persister = Persister(session_run_id)
     _write_run_start_meta(session_run_id, config.model, config.system_prompt)  # 在途 run 立即可见(问题1)
@@ -690,7 +708,7 @@ async def run_agent_loop(registry: ToolRegistry,
             tool_executor=tool_executor,
             config=config,
             state=state,
-            sink=CompositeSink(printer, tracer),
+            sink=CompositeSink(printer, tracer, event_store),
             persist=True,
             guardrail_runner=tool_executor.guardrail_runner,  # 阶段8
             memory_store=memory_store,  # 步6:传给 builder 分层注入
@@ -781,6 +799,7 @@ async def run_agent_loop(registry: ToolRegistry,
               f"tokens={rep.token_total} tool_ok={rep.tool_success_rate:.0%}", file=sys.stderr)
     finally:
         persister.close()
+        event_store.close()
 
 def main():
     # 用 tools 子包的默认 registry：@tool 装饰器把 getnowtime 注册到了那里

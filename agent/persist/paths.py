@@ -24,6 +24,13 @@ def run_meta_path(run_id: str) -> Path:
     return run_dir(run_id) / "run_meta.json"
 
 
+def events_path(run_id: str) -> Path:
+    """events.jsonl 落盘:给前端的事件流(web 契约 = is_web_event),逐条 JSONL。
+    和 transcript(消息事实)/ trace(观测 span)同 run_id 同目录,补上"前端消费过什么"的耐久层。
+    前端历史恢复可精确重放(不再从 transcript 反推);EventStore 惰性建文件(无 web 事件不建)。"""
+    return run_dir(run_id) / "events.jsonl"
+
+
 def tool_results_dir(run_id: str) -> Path:
     """工具结果落盘子目录(步3 ToolResultBudget 用)。不 mkdir,由调用方按需建。"""
     return run_dir(run_id) / "tool-results"

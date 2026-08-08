@@ -1,11 +1,14 @@
-// lib/events.ts - web 消费的消息级事件(对齐后端 events.py 消息级契约 + CC 外部 StructuredIO)
-// 后端 server.py _is_web_event 白名单只转发 6 种自包含事件,前端不用再累积 delta:
+// lib/events.ts - web 消费的消息级事件(单点契约的 TS 镜像 + CC 外部 StructuredIO)
+// 契约唯一真源:agent/streaming/events.py 的 is_web_event(WEB_EVENT_TYPES)。
+// 后端 server.py SSE 过滤 与 EventStore 落盘(events.jsonl)共用同一判定;本文件必须与它一致:
 //   RunStart / RunEnd          - turn 书签
 //   AssistantMessage           - 完整 assistant 消息(每 step 一条,自带 usage/tool_calls)
 //   ToolStart                  - 工具开始(resume/_workflow 无 LLM step 时给前端建卡)
 //   ToolResultMessage          - 完整工具结果(call_id 关联,自带 elapsed_ms)
 //   ApprovalRequestEvent       - HITL(ChatContext 拦截弹窗,不进消息体)
+//   TaskNotification           - 后台子 agent 完成通知(自动 turn 开头推,渲染系统提示行)
 // 关联键 call_id:AssistantMessage.tool_calls 建卡,ToolResultMessage 按 call_id 跨消息 patch。
+// 若后端 events.jsonl 被用作历史恢复,reducer 可直接重放其中 {"type", ...} 记录(含 ts)。
 import type { ChatMessage, ToolCallView, TokenUsage } from "./types";
 
 export type StreamEvent =
