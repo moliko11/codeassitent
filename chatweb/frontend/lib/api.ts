@@ -17,9 +17,9 @@ export const apiApprove = (requestId: string, allow: boolean, reason = "") =>
     body: JSON.stringify({ allow, reason }),
   });
 
-// 流式 turn:POST /sessions/:id/turn,返回 SSE 流(body 与 BFF 时代不同——后端只收 {input},
-// sessionId 在 URL 路径里,原 BFF /api/chat 的 {sessionId, input} 在此解包)。
-export const apiChat = (sessionId: string, input: string, signal: AbortSignal) =>
+// 触发 turn:POST /sessions/:id/turn,立即返回 202(单通道:事件不在这流回,走 /stream)。
+// body 与 BFF 时代不同——后端只收 {input},sessionId 在 URL 路径里。
+export const apiChat = (sessionId: string, input: string, signal?: AbortSignal) =>
   fetch(`${AGENT_API}/sessions/${sessionId}/turn`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -30,10 +30,10 @@ export const apiChat = (sessionId: string, input: string, signal: AbortSignal) =
 export const apiMessages = (sessionId: string) =>
   fetch(`${AGENT_API}/sessions/${sessionId}/messages`);
 
-// 后台自动 turn 事件长轮询(待办 A):GET /sessions/:id/events?timeout=20
-// 后台 subagent 完成 -> 后端 session loop 自动起一轮 turn,事件缓冲;前端空闲时 long-poll 拉取。
-export const apiEvents = (sessionId: string, signal?: AbortSignal) =>
-  fetch(`${AGENT_API}/sessions/${sessionId}/events?timeout=20`, { signal });
+// 会话事件流(单通道):常驻 SSE,EventSource 订阅。用户 turn / 自动 turn / HITL 事件全在这条流。
+// 连接断开 EventSource 自动重连,断期间事件在服务端队列缓冲,重连后补发。
+export const apiStreamUrl = (sessionId: string) =>
+  `${AGENT_API}/sessions/${sessionId}/stream`;
 
 export const apiRename = (sessionId: string, title: string) =>
   fetch(`${AGENT_API}/sessions/${sessionId}/rename`, {

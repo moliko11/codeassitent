@@ -12,15 +12,15 @@ import {
 import type { ApprovalRequest, ChatMessage, SessionSummary } from "@/lib/types";
 import type { StreamEvent } from "@/lib/events";
 import { eventReducer } from "@/lib/events";
-import { readSSE } from "@/lib/sseStream";
 import { newId } from "@/lib/mockData";
-import { apiSessions, apiCreateSession, apiApprove, apiChat, apiMessages, apiRename, apiEvents } from "@/lib/api";
+import { apiSessions, apiCreateSession, apiApprove, apiChat, apiMessages, apiRename, apiStreamUrl } from "@/lib/api";
 
 /**
  * ChatContext - 真实后端版(替换模板的 mock provider)。
- * 接 code/agent FastAPI 后端(Phase 2 §2.2 起直连,静态导出后无 BFF 层):
- * POST /sessions/:id/turn 流式消费 SSE,eventReducer 聚合消息级事件(AssistantMessage/
- * ToolResultMessage/RunStart/RunEnd/ToolStart/ApprovalRequestEvent) -> ChatMessage 列表。
+ * 接 code/agent FastAPI 后端(Phase 2 §2.2 起直连,静态导出后无 BFF 层)。
+ * 单通道事件流:POST /sessions/:id/turn 只触发 turn;全部事件(用户 turn/自动 turn/HITL)
+ * 经 GET /sessions/:id/stream 的常驻 SSE(EventSource)到达,eventReducer 聚合消息级事件
+ * (AssistantMessage/ToolResultMessage/RunStart/RunEnd/ToolStart/ApprovalRequestEvent) -> ChatMessage。
  * sessions 来自 list_runs()。见 chat-template-integration.md §5/§7。
  */
 
@@ -68,8 +68,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const [sessions, setSessions] = useState<SidebarSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [pendingApproval, setPendingApproval] = useState<ApprovalRequest | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
   const approvalTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const streamRef = useRef<EventSource | null>(null);   // 会话事件流(单通道)
+  const processedApprovalIdsRef = useRef<Set<string>>(new Set());   // 已处理过的 HITL 请求(防重连补发重复弹窗)
 
   const refreshSessions = useCallback(async () => {
     try {
@@ -86,8 +87,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   }, [refreshSessions]);
 
   const stopStreaming = useCallback(() => {
-    abortRef.current?.abort();
-    abortRef.current = null;
+    // 关掉事件流(服务端 turn 照跑,事件在队列缓冲;重开会话/重连再同步)。
+    streamRef.current?.close();
+    streamRef.current = null;
     setIsStreaming(false);
     setMessages((prev) =>
       prev.map((m) => (m.streaming ? { ...m, streaming: false, status: "failed" as const } : m)),
@@ -125,9 +127,12 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     [resolveApproval],
   );
 
-  // HITL 弹窗处理:sendMessage 的 per-turn SSE 与自动 turn 的 /events 长轮询共用(待办 A)。
+  // HITL 弹窗处理:单通道下所有审批事件经 /stream 到达(restore 重放与重连补发会重叠,
+  // 用 processedApprovalIds 去重——已处理过的请求不再弹窗)。
   const handleApprovalEvent = useCallback(
     (ev: Extract<StreamEvent, { type: "ApprovalRequestEvent" }>) => {
+      if (processedApprovalIdsRef.current.has(ev.request_id)) return;
+      processedApprovalIdsRef.current.add(ev.request_id);
       const req: ApprovalRequest = {
         requestId: ev.request_id,
         toolName: ev.tool_name,
@@ -147,6 +152,39 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     },
     [queueApproval, resolveApproval],
   );
+
+  // ── 会话事件流(单通道):一条 EventSource 订阅全部事件(用户/自动 turn + HITL) ──
+  const closeStream = useCallback(() => {
+    streamRef.current?.close();
+    streamRef.current = null;
+  }, []);
+
+  const openStream = useCallback(
+    (id: string) => {
+      closeStream();
+      const es = new EventSource(apiStreamUrl(id));
+      es.onmessage = (e) => {
+        try {
+          const ev = JSON.parse(e.data) as StreamEvent;
+          if (ev.type === "ApprovalRequestEvent") {
+            handleApprovalEvent(ev);
+          } else {
+            setMessages((prev) => eventReducer({ messages: prev, streaming: true }, ev).messages);
+            // RunStart/RunEnd 驱动 UI streaming 状态(POST /turn 只触发,不再流回)
+            if (ev.type === "RunStart") setIsStreaming(true);
+            else if (ev.type === "RunEnd") setIsStreaming(false);
+          }
+        } catch {
+          /* 损坏行忽略 */
+        }
+      };
+      es.onerror = () => setIsStreaming(false);   // 流断开保守压掉 streaming(EventSource 自动重连,断期间事件在服务端队列缓冲)
+      streamRef.current = es;
+    },
+    [closeStream, handleApprovalEvent],
+  );
+
+  useEffect(() => () => closeStream(), [closeStream]);   // 卸载时关流
 
   const sendMessage = useCallback(
     async (content: string) => {
@@ -170,6 +208,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           const { run_id } = await r.json();
           sid = run_id;
           setActiveSessionId(sid);
+          openStream(sid);   // 新会话开流;turn 事件进队列,流连接后补发
         } catch (e) {
           setMessages((prev) => [
             ...prev,
@@ -180,66 +219,59 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         }
       }
 
-      // 流式消费 SSE:消息级事件 -> eventReducer(不预建占位,AssistantMessage 每条 append 一气泡)
-      const ctrl = new AbortController();
-      abortRef.current = ctrl;
+      // 流没开就重开(stopStreaming 关流后,用户再发消息仍能收到事件)
+      if (!streamRef.current) openStream(sid);
+
       try {
-        let res = await apiChat(sid, text, ctrl.signal);
+        let res = await apiChat(sid, text);
         // session 丢失(后端重启后内存 session_manager 清空)-> 重建 session 重试一次
         if (!res.ok && res.status === 404) {
           const r2 = await apiCreateSession();
           const j2 = await r2.json();
           sid = j2.run_id;
           setActiveSessionId(sid);
-          res = await apiChat(sid, text, ctrl.signal);
+          openStream(sid);
+          res = await apiChat(sid, text);
         }
         if (!res.ok) throw new Error(await res.text());
-        for await (const ev of readSSE(res)) {
-          const typed = ev as unknown as StreamEvent;
-          // HITL(阶段0):需人工批准 -> 弹窗(不进消息体);点 Allow/Deny 后 POST /approve 解 future
-          if (typed.type === "ApprovalRequestEvent") {
-            handleApprovalEvent(typed);
-            continue;
-          }
-          setMessages((prev) => eventReducer({ messages: prev, streaming: true }, typed).messages);
-        }
+        // 触发成功:事件经 /stream 到达,RunStart/RunEnd 驱动 streaming 状态;
+        // 本 POST 只触发 turn,不读响应流。
       } catch (e: unknown) {
         const err = e as { name?: string; message?: string };
-        if (err.name !== "AbortError") {
-          setMessages((prev) => {
-            // 有进行中的 assistant 消息 -> 标 failed;否则 append 一条错误气泡
-            const streamingIdx = prev.findLastIndex((m) => m.streaming);
-            if (streamingIdx >= 0) {
-              return prev.map((m, i) =>
-                i === streamingIdx
-                  ? { ...m, streaming: false, status: "failed" as const, content: m.content || `错误: ${err.message || e}` }
-                  : m,
-              );
-            }
-            return [
-              ...prev,
-              { id: newId("a"), role: "assistant" as const, content: `错误: ${err.message || e}`, streaming: false, status: "failed" as const, createdAt: Date.now() },
-            ];
-          });
-        }
-      } finally {
-        abortRef.current = null;
+        setMessages((prev) => {
+          // 有进行中的 assistant 消息 -> 标 failed;否则 append 一条错误气泡
+          const streamingIdx = prev.findLastIndex((m) => m.streaming);
+          if (streamingIdx >= 0) {
+            return prev.map((m, i) =>
+              i === streamingIdx
+                ? { ...m, streaming: false, status: "failed" as const, content: m.content || `错误: ${err.message || e}` }
+                : m,
+            );
+          }
+          return [
+            ...prev,
+            { id: newId("a"), role: "assistant" as const, content: `错误: ${err.message || e}`, streaming: false, status: "failed" as const, createdAt: Date.now() },
+          ];
+        });
         setIsStreaming(false);
-        refreshSessions(); // 刷新 sidebar(新 run_meta)
+      } finally {
+        refreshSessions(); // 刷新 sidebar(新 run_meta;RunEnd 已由 run_turn 落盘)
       }
     },
-    [isStreaming, activeSessionId, refreshSessions, queueApproval, resolveApproval],
+    [isStreaming, activeSessionId, refreshSessions, openStream],
   );
 
   const newChat = useCallback(() => {
     stopStreaming();
+    closeStream();
     setMessages([]);
     setActiveSessionId(null);
-  }, [stopStreaming]);
+  }, [stopStreaming, closeStream]);
 
   const selectSession = useCallback(
     async (id: string) => {
       stopStreaming();
+      closeStream();
       setActiveSessionId(id);
       // 恢复历史消息:优先重放 events.jsonl(后端 /sessions/:id/messages source=events),
       // 恢复画面 = 直播画面(eventReducer 是唯一投影,前端不维护第二套恢复逻辑);
@@ -266,46 +298,12 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       } catch {
         setMessages([]);
       }
+      // 恢复后开流:新事件(用户/自动 turn + HITL)从这来。断期间事件在服务端队列缓冲,
+      // 重连补发;与 restore 重叠的事件由 eventReducer 按 uuid 幂等去重。
+      openStream(id);
     },
-    [stopStreaming],
+    [stopStreaming, closeStream, openStream],
   );
-
-  // 待办 A:后台自动 turn 事件长轮询。后台 subagent 完成 -> 后端 session loop 自动起一轮 turn,
-  // 事件缓冲在后端;这里空闲时 long-poll /events 拉取,eventReducer 渲染(主 agent 自动处理通知,
-  // 不用等用户下次发消息——对齐 CC 空闲自动处理)。用户 turn 事件仍走 per-turn POST SSE,
-  // 两者不冲突:后端 turn_lock 保证用户 turn 与自动 turn 不重叠。
-  useEffect(() => {
-    if (!activeSessionId) return;
-    const ctrl = new AbortController();
-    let stop = false;
-    (async () => {
-      while (!stop) {
-        try {
-          const res = await apiEvents(activeSessionId, ctrl.signal);
-          if (stop) break;
-          if (res.ok) {
-            const evs = (await res.json()) as StreamEvent[];
-            for (const ev of evs) {
-              if (ev.type === "ApprovalRequestEvent") {
-                handleApprovalEvent(ev);
-              } else {
-                setMessages((prev) => eventReducer({ messages: prev, streaming: true }, ev).messages);
-              }
-            }
-          }
-        } catch (e) {
-          if ((e as { name?: string }).name === "AbortError") break;
-          // 后端未起/网络抖动:静默,下一轮再试
-        }
-        if (stop) break;
-        await new Promise((r) => setTimeout(r, 800));
-      }
-    })();
-    return () => {
-      stop = true;
-      ctrl.abort();
-    };
-  }, [activeSessionId, handleApprovalEvent]);
 
   // Phase 1 §1.1:重命名当前会话 -> POST BFF -> 后端更新 session 内存态 + run_meta 侧车,
   // 成功后刷新 sessions 让 sidebar 立即反映(标题下次 refreshSessions 也保持一致)。

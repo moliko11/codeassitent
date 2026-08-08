@@ -114,6 +114,9 @@ export function eventReducer(state: ChatState, ev: StreamEvent): ChatState {
       return { ...state, streaming: true };
 
     case "AssistantMessage": {
+      // 幂等:uuid 已存在 -> 跳过(单通道下 restore 重放 events.jsonl 与 /stream 重连
+      // 补发队列会重叠,同 uuid 的消息不重复 append)。
+      if (state.messages.some((m) => m.id === ev.uuid)) return state;
       // 每 step 一条消息,自带 usage(修"只显示最后一步 token")
       const msg: ChatMessage = {
         id: ev.uuid,
@@ -189,10 +192,13 @@ export function eventReducer(state: ChatState, ev: StreamEvent): ChatState {
 
     case "TaskNotification": {
       // 后台子 agent 完成 -> 系统提示行(对齐 CLI 的 [后台任务] 打印;web/app 此前没有)
+      // 幂等:同 run 的通知只插一条(restore 与 stream 重叠时防重复系统行)。
+      const content = `[后台任务] ${ev.role} 完成(status=${ev.status})`;
+      if (state.messages.some((m) => m.role === "system" && m.content === content)) return state;
       const notice: ChatMessage = {
         id: "tn-" + ev.run_id.slice(0, 6) + "-" + state.messages.length,
         role: "system",
-        content: `[后台任务] ${ev.role} 完成(status=${ev.status})`,
+        content,
         createdAt: Date.now(),
       };
       return { ...state, messages: [...state.messages, notice] };

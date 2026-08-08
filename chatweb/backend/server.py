@@ -103,18 +103,11 @@ def ensure_session(run_id: str) -> SessionState | None:
 async def _run_auto_turn(sess: SessionState, notification: str,
                          role: str = "subagent", status: str = "completed", text: str = ""):
     """自动 turn:合成 [task-notification] user 消息跑一轮(会话机制全在 sess.run_turn:
-    发 TaskNotification 事件 + 持锁串行 + 同步 messages + RunEnd + run_meta),
-    事件缓冲进 sess.event_queue(前端 /events 长轮询拉)。HITL 照常走 web_confirmer
-    (set_active_sse_queue 指向本 turn 队列 -> ApprovalRequestEvent 也进 event_queue)。"""
-    q: asyncio.Queue = asyncio.Queue()
-    set_active_sse_queue(q)   # 本 turn 的 HITL 审批事件进 q(多 session 并发互不串)
-    sse_sink = SSESink(q)
-    await sess.run_turn(notification, sse_sink, notification=(role, text, status))
-    # 本 turn 事件 -> session 事件缓冲(只搬 web 白名单,前端能消费)。RunEnd 是完整边界。
-    while not q.empty():
-        ev = q.get_nowait()
-        if is_web_event(ev):
-            sess.event_queue.put_nowait(ev)
+    发 TaskNotification 事件 + 持锁串行 + 同步 messages + RunEnd + run_meta)。
+    单通道:事件直接进 sess.event_queue(常驻 SSE 流 /stream 消费),HITL 审批事件
+    也进同一队列(set_active_sse_queue 指向它)——不再 per-turn 队列 + 搬运。"""
+    set_active_sse_queue(sess.event_queue)   # HITL 审批事件进 session 事件队列(单通道)
+    await sess.run_turn(notification, SSESink(sess.event_queue), notification=(role, text, status))
 
 
 async def _session_loop(sess: SessionState, run_auto_turn=None):
@@ -224,38 +217,32 @@ async def create_session():
     return {"run_id": sess.run_id, "created_at": sess.created_at}
 
 
+# fire-and-forget turn 任务的强引用集(防任务被 GC;done 回调即移除)
+_turn_tasks: set[asyncio.Task] = set()
+
+
+def _spawn_turn(sess: SessionState, user_input: str, *, notification=None):
+    """触发一轮 turn(fire-and-forget):事件经 SSESink 进 sess.event_queue,前端从 /stream 消费。
+    返回 task(调用方可 await 或忽略)。"""
+    set_active_sse_queue(sess.event_queue)   # HITL 审批事件进 session 事件队列(单通道)
+    task = asyncio.create_task(sess.run_turn(user_input, SSESink(sess.event_queue), notification=notification))
+    _turn_tasks.add(task)
+    task.add_done_callback(_turn_tasks.discard)
+    return task
+
+
 @app.post("/sessions/{run_id}/turn")
 async def turn(run_id: str, body: TurnBody):
-    """多轮:复用 session 跑一轮,SSE 流式回事件(POST + ReadableStream)。
+    """多轮:触发一轮 turn,事件走 session 常驻 SSE 流(GET /sessions/{id}/stream)。
 
-    会话机制全在 sess.run_turn(内部持 turn_lock 串行用户/自动 turn、同步 messages、
-    发 RunEnd、落 run_meta);本端点只做:SSESink 转发事件 + 前端白名单过滤。"""
+    单通道(修"一会话三通道"):不再 per-turn 建队列 + 在 POST 响应里流回;run_turn 的
+    事件直接进 sess.event_queue,前端从 /stream 订阅(用户 turn 与自动 turn 同一条流)。
+    turn 触发即返回 202,RunStart/RunEnd 由前端从流里拿(驱动 streaming 状态)。"""
     sess = ensure_session(run_id)
     if not sess:
         raise HTTPException(status_code=404, detail="session not found")
-
-    q: asyncio.Queue = asyncio.Queue()
-    # HITL(阶段0):把本 turn 的 SSE 队列写进 ContextVar,web_confirmer 推 approval_request 事件到
-    # 前端弹窗。set 在 create_task 前 -> run_and_signal 子任务继承(多 session 并发互不串)。
-    set_active_sse_queue(q)
-    sse_sink = SSESink(q)
-
-    async def run_and_signal():
-        await sess.run_turn(body.input, sse_sink)
-
-    async def gen():
-        task = asyncio.create_task(run_and_signal())
-        while True:
-            ev = await q.get()
-            if not is_web_event(ev):
-                continue   # delta/机制事件:CLI/tracer 已消费,web 无需(吞掉不转发)
-            yield f"data: {json.dumps(_event_to_dict(ev), ensure_ascii=False)}\n\n"
-            if isinstance(ev, RunEnd):
-                break
-        await task
-
-    return StreamingResponse(gen(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    _spawn_turn(sess, body.input)
+    return {"ok": True, "run_id": sess.run_id}
 
 
 @app.get("/sessions")
@@ -273,29 +260,28 @@ async def get_session(run_id: str):
     return rep.to_dict()
 
 
-@app.get("/sessions/{run_id}/events")
-async def get_session_events(run_id: str, timeout: float = 20.0):
-    """前端 long-poll(待办 A):拉后台自动 turn 的事件(后台 subagent 完成触发)。
+async def _stream_gen(sess: SessionState):
+    """会话事件流生成器(常驻 SSE data 行):消费 sess.event_queue 的 web 契约事件。
+    独立命名以便测试直接驱动(queue -> SSE 行);端点只是 StreamingResponse 薄壳。"""
+    while True:
+        ev = await sess.event_queue.get()
+        if not is_web_event(ev):
+            continue   # delta/机制事件:CLI/tracer 已消费,web 无需(吞掉不转发)
+        yield f"data: {json.dumps(_event_to_dict(ev), ensure_ascii=False)}\n\n"
 
-    用户 turn 事件仍走 per-turn POST SSE;这里是**自动 turn**(session loop 自发起的,没有 POST 触发)
-    的事件缓冲。无事件时 hold 至多 timeout 秒返回空数组(轮询续命)。返回完整自动 turn 块:
-    排空缓冲到第一个 RunEnd 为止,保证前端一次拿到一轮自包含事件。"""
+
+@app.get("/sessions/{run_id}/stream")
+async def stream_session(run_id: str):
+    """会话事件流(单通道):常驻 SSE,消费 sess.event_queue 的全部 web 契约事件。
+
+    用户 turn(POST /turn 触发)与自动 turn(session loop)的事件都进 sess.event_queue,
+    前端开一条 EventSource 订阅即拿到全部。连接断开会话内事件在队列缓冲,重连后补发。
+    RunEnd 不 break(持久流,前端凭 RunStart/RunEnd 落 streaming 状态)。"""
     sess = ensure_session(run_id)
     if not sess:
         raise HTTPException(status_code=404, detail="session not found")
-    events: list[dict] = []
-    try:
-        while not sess.event_queue.empty():
-            ev = sess.event_queue.get_nowait()
-            events.append(_event_to_dict(ev))
-            if isinstance(ev, RunEnd):
-                break   # 一轮完整自动 turn,返回让前端落状态
-        if not events:
-            ev = await asyncio.wait_for(sess.event_queue.get(), timeout=timeout)
-            events.append(_event_to_dict(ev))
-    except asyncio.TimeoutError:
-        pass
-    return events
+    return StreamingResponse(_stream_gen(sess), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 def _transcript_to_messages(run_id: str) -> list[dict]:

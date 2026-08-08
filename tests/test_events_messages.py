@@ -209,4 +209,77 @@ def test_session_loop_consumes_notify_and_runs_auto_turn():
     # 注:turn 串行语义(用户 turn vs 自动 turn 互斥)已上收到 Session.run_turn 内部持锁,
     # 见 tests/test_session.py::test_run_turn_serializes_on_turn_lock(原锁测试已迁走)。
 
-    asyncio.run(_run())
+
+@requires_server
+def test_single_channel_spawn_turn_events_into_session_queue(tmp_path, monkeypatch):
+    """单通道(修"一会话三通道"):POST /turn 触发(fire-and-forget,不流回响应)->
+    run_turn 事件直接进 sess.event_queue(/stream 消费),不再 per-turn 队列。"""
+    import json
+    from unittest import mock
+
+    from chatweb.backend import server
+    import agent.persist.paths as paths
+    from agent.session import Session
+    from agent.core.state import AgentState
+    from agent.streaming.events import RunStart, AssistantMessage, RunEnd
+
+    monkeypatch.setattr(paths, "PERSIST_ROOT", tmp_path / "runs")
+    sess = server.SessionState.create(
+        registry=server._registry, model_adapter=object(), tool_executor=server._tool_executor,
+        config=server._config, guardrail_runner=server._guardrail_runner,
+        memory_store=server._memory_store, workspace=server._workspace,
+    )
+
+    async def fake_run_turn(self, user_input, frontend_sink, *, notification=None):
+        # 桩:模拟 run_turn 经 session sink 发一轮事件(frontend_sink = SSESink(sess.event_queue))
+        sink = self.make_turn_sink(frontend_sink)
+        sink.emit(RunStart(run_id=self.run_id))
+        sink.emit(AssistantMessage(run_id=self.run_id, uuid="u1", text="hi"))
+        sink.emit(RunEnd(status="completed"))
+        return AgentState(run_id=self.run_id, messages=self.messages)
+
+    async def _run():
+        with mock.patch.object(Session, "run_turn", fake_run_turn):
+            task = server._spawn_turn(sess, "hi")
+            await task
+        evs = []
+        while not sess.event_queue.empty():
+            evs.append(sess.event_queue.get_nowait())
+        return evs
+
+    evs = asyncio.run(_run())
+    assert [type(e).__name__ for e in evs] == ["RunStart", "AssistantMessage", "RunEnd"]
+
+
+@requires_server
+def test_stream_gen_serves_session_queue(tmp_path, monkeypatch):
+    """_stream_gen(单通道端点底层的生成器):消费 sess.event_queue 的 web 契约事件,
+    产出 SSE data 行(带 type/字段)。RunEnd 不 break(持久流),前端凭 RunStart/RunEnd 落状态。"""
+    import json
+
+    from chatweb.backend import server
+    import agent.persist.paths as paths
+    from agent.streaming.events import RunStart, AssistantMessage, RunEnd
+
+    monkeypatch.setattr(paths, "PERSIST_ROOT", tmp_path / "runs")
+    sess = server.SessionState.create(
+        registry=server._registry, model_adapter=object(), tool_executor=server._tool_executor,
+        config=server._config, guardrail_runner=server._guardrail_runner,
+        memory_store=server._memory_store, workspace=server._workspace,
+    )
+    # 预填队列(模拟一个 turn 已触发)
+    sess.event_queue.put_nowait(RunStart(run_id=sess.run_id))
+    sess.event_queue.put_nowait(AssistantMessage(run_id=sess.run_id, uuid="u1", text="hi"))
+    sess.event_queue.put_nowait(RunEnd(status="completed"))
+
+    async def _run():
+        types: list[str] = []
+        async for line in server._stream_gen(sess):
+            ev = json.loads(line[6:])   # 剥 "data: " 前缀
+            types.append(ev["type"])
+            if ev["type"] == "RunEnd":
+                break   # 测试侧 break(生产流常驻)
+        return types
+
+    types = asyncio.run(_run())
+    assert types == ["RunStart", "AssistantMessage", "RunEnd"]
