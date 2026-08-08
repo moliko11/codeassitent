@@ -241,12 +241,28 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     async (id: string) => {
       stopStreaming();
       setActiveSessionId(id);
-      // 恢复历史消息:读 transcript 转 ChatMessage(后端 /sessions/:id/messages)
+      // 恢复历史消息:优先重放 events.jsonl(后端 /sessions/:id/messages source=events),
+      // 恢复画面 = 直播画面(eventReducer 是唯一投影,前端不维护第二套恢复逻辑);
+      // 老 run(无 events.jsonl)退化用后端 transcript 转好的 ChatMessage(source=transcript)。
       try {
         const r = await apiMessages(id);
         if (!r.ok) throw new Error(await r.text());
-        const msgs = await r.json();
-        setMessages(msgs);
+        const data = await r.json();
+        if (data?.source === "events") {
+          let st: { messages: ChatMessage[]; streaming: boolean } = { messages: [], streaming: false };
+          for (const ev of (data.events as StreamEvent[]) || []) {
+            st = eventReducer(st, ev);
+          }
+          // 无 RunEnd 的 run(中断)reducer 停在 streaming:true,恢复时压成 completed 快照,
+          // 避免恢复出来的历史一直转圈(与 transcript 路径的 completed 默认对齐)。
+          setMessages(
+            st.streaming
+              ? st.messages.map((m) => ({ ...m, streaming: false, status: "completed" as const }))
+              : st.messages,
+          );
+        } else {
+          setMessages((data?.messages as ChatMessage[]) || []);
+        }
       } catch {
         setMessages([]);
       }

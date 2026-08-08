@@ -187,3 +187,34 @@ def test_transcript_handles_no_thinking_usage():
     msgs = _transcript_to_messages("r-recover4")
     a = next(m for m in msgs if m["role"] == "assistant")
     assert "thinking" not in a and "usage" not in a
+
+
+@requires_server
+def test_messages_endpoint_prefers_events_source():
+    """历史恢复端点:有 events.jsonl -> source=events(前端重放,含 thinking,恢复=直播画面);
+    只有 transcript(老 run,无 events.jsonl)-> 退化 source=transcript(直接可用)。"""
+    from fastapi.testclient import TestClient
+    from chatweb.backend import server
+    from agent.streaming.event_store import EventStore
+    from agent.streaming.events import RunStart, AssistantMessage, RunEnd
+
+    client = TestClient(server.app)
+
+    # 新 run:events.jsonl 优先(source=events,前端过 eventReducer 重放)
+    store = EventStore("r-evt")
+    try:
+        store.emit(RunStart(run_id="r-evt"))
+        store.emit(AssistantMessage(run_id="r-evt", uuid="u1", text="hi", thinking="先想"))
+        store.emit(RunEnd(status="completed"))
+    finally:
+        store.close()
+    data = client.get("/sessions/r-evt/messages").json()
+    assert data["source"] == "events"
+    assert [e["type"] for e in data["events"]] == ["RunStart", "AssistantMessage", "RunEnd"]
+    assert data["events"][1]["thinking"] == "先想"   # thinking 随事件落盘,恢复不丢
+
+    # 老 run:只有 transcript -> 退化 source=transcript(messages 直接可用)
+    _seed_transcript("r-evt-old")
+    data2 = client.get("/sessions/r-evt-old/messages").json()
+    assert data2["source"] == "transcript"
+    assert any(m["role"] == "assistant" for m in data2["messages"])

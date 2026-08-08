@@ -30,6 +30,30 @@ def read_transcript(run_id: str):
                 _log.warning("read_transcript: 跳过损坏行 (run_id=%s)", run_id)
 
 
+def read_events(run_id: str) -> list[dict] | None:
+    """读 events.jsonl(前端事件流)供前端重放,恢复画面 = 直播画面。
+
+    无 events.jsonl(老 run,只有 transcript)返回 None,调用方退回落 transcript;
+    损坏行跳过+告警(同 read_transcript)。返回的事件列表每条含 type/字段/ts,
+    前端可直接过 eventReducer 重放(不需要第二套恢复逻辑)。
+    """
+    from . import paths
+    p = paths.PERSIST_ROOT / run_id / "events.jsonl"   # 直构,避免 run_dir 的 mkdir 副作用(同 read_run_report)
+    if not p.exists():
+        return None
+    out: list[dict] = []
+    with open(p, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                _log.warning("read_events: 跳过损坏行 (run_id=%s)", run_id)
+    return out
+
+
 # ── 监控 M1:读 run(列表/单 run 指标),只读不改采集层 ──
 
 def _scan_transcript_tail(run_id: str) -> dict:

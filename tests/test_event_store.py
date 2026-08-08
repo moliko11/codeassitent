@@ -18,6 +18,7 @@ import json
 import pytest
 
 import agent.persist.paths as paths
+from agent.persist.store import read_events
 from agent.agentloop import agentloop
 from agent.runtime import RuntimeContext
 from agent.config.config import AgentConfig
@@ -140,6 +141,30 @@ def test_event_store_lazy_no_empty_file(tmp_path):
     finally:
         store.close()
     assert not (tmp_path / "events.jsonl").exists()
+
+
+def test_read_events_from_disk(tmp_path):
+    """read_events 读回 events.jsonl(给前端重放);无 events.jsonl 返回 None;损坏行跳过。"""
+    run_id = "es-read"
+    store = EventStore(run_id)
+    try:
+        store.emit(RunStart(run_id=run_id))
+        store.emit(AssistantMessage(run_id=run_id, uuid="u1", text="hi", thinking="想"))
+        store.emit(TextDelta(text="x"))   # 非 web,不落
+    finally:
+        store.close()
+    events = read_events(run_id)
+    assert events is not None
+    assert [e["type"] for e in events] == ["RunStart", "AssistantMessage"]
+    assert events[1]["text"] == "hi" and events[1]["thinking"] == "想"   # thinking 随事件落盘,恢复不丢
+    assert read_events("es-no-such-run") is None                         # 无 events.jsonl(老 run)-> None
+
+    # 损坏行跳过(同 read_transcript 容错)
+    from agent.persist.paths import run_dir
+    with open(run_dir("es-read") / "events.jsonl", "a", encoding="utf-8") as f:
+        f.write("{bad json}\n")
+    events2 = read_events(run_id)
+    assert [e["type"] for e in events2] == ["RunStart", "AssistantMessage"]
 
 
 def test_agentloop_persist_writes_events_jsonl(tmp_path):

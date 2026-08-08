@@ -41,7 +41,7 @@ from agent.streaming.event_store import EventStore
 from agent.tracing import Tracer, TraceStore
 from agent.tracing.metrics import MetricsCollector
 from agent.persist.paths import memory_dir, PERSIST_ROOT, run_dir
-from agent.persist.store import list_runs, read_run_report, read_transcript, set_run_title
+from agent.persist.store import list_runs, read_run_report, read_transcript, read_events, set_run_title
 from agent.persist.persister import Persister
 from agent.memory import MemoryStore
 from agent.tools.memory_tool import make_save_memory_tool
@@ -502,8 +502,13 @@ def _transcript_to_messages(run_id: str) -> list[dict]:
 
 @app.get("/sessions/{run_id}/messages")
 async def get_messages(run_id: str):
-    """恢复历史消息(读 transcript 转 ChatMessage)。"""
-    return _transcript_to_messages(run_id)
+    """恢复历史消息。优先重放 events.jsonl(前端事件流:精确还原直播画面,含 thinking/每步
+    usage/真实耗时);老 run(无 events.jsonl)退化读 transcript 转 ChatMessage(兼容既有数据)。
+    前端按 source 分支:events -> 过 eventReducer 重放;transcript -> 直接用 messages。"""
+    events = read_events(run_id)
+    if events is not None:
+        return {"source": "events", "events": events}
+    return {"source": "transcript", "messages": _transcript_to_messages(run_id)}
 
 
 @app.delete("/sessions/{run_id}")
