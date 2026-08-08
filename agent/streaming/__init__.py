@@ -5,7 +5,7 @@
 from .events import (
     StreamEvent,
     AssistantMessage, ToolResultMessage,
-    RunStart, StepStart, StepEnd, RunEnd, ToolStart, ToolEnd,
+    RunStart, StepStart, StepEnd, RunEnd, ToolStart, ToolEnd, TaskNotification,
     TextDelta, ToolCallStart, ToolCallDelta, ToolCallEnd, MessageEnd,
 )
 from .sink import EventSink, NullSink, CompositeSink
@@ -13,7 +13,7 @@ from .sink import EventSink, NullSink, CompositeSink
 __all__ = [
     "StreamEvent",
     "AssistantMessage", "ToolResultMessage",
-    "RunStart", "StepStart", "StepEnd", "RunEnd", "ToolStart", "ToolEnd",
+    "RunStart", "StepStart", "StepEnd", "RunEnd", "ToolStart", "ToolEnd", "TaskNotification",
     "TextDelta", "ToolCallStart", "ToolCallDelta", "ToolCallEnd", "MessageEnd",
     "EventSink", "NullSink", "CompositeSink",
 ]

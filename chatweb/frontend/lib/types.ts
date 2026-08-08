@@ -24,7 +24,7 @@ export interface ToolCallView {
 
 export interface ChatMessage {
   id: string;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "system"; // system = 系统提示行(后台任务完成通知等)
   content: string;          // AssistantMessage.text(整包,非累积)
   thinking?: string;        // AssistantMessage.thinking(整包,折叠展示)
   toolCalls?: ToolCallView[];

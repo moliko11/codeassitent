@@ -25,7 +25,7 @@ from agent.tools.defs import ToolCall, Tool, ToolSpec
 from agent.streaming.sink import EventSink
 from agent.streaming.events import (
     AssistantMessage, ToolResultMessage, RunStart, RunEnd, ToolStart, ApprovalRequestEvent,
-    StepStart, StepEnd, TextDelta, ThinkingDelta, ToolCallStart, ToolCallDelta,
+    TaskNotification, StepStart, StepEnd, TextDelta, ThinkingDelta, ToolCallStart, ToolCallDelta,
     ToolCallEnd, MessageEnd, ToolEnd,
 )
 
@@ -168,6 +168,7 @@ def test_is_web_event_whitelist():
     assert mk(ToolResultMessage(run_id="r", uuid="u", call_id="c", tool_name="read", ok=True)) is True
     assert mk(ToolStart(call_id="c", tool_name="read", arguments={})) is True
     assert mk(ApprovalRequestEvent(request_id="x", tool_name="bash", reason="r", arguments={})) is True
+    assert mk(TaskNotification(run_id="r", status="completed", text="x")) is True
 
     for ev in (StepStart(step_index=0), StepEnd(step_index=0), TextDelta(text="x"),
                ThinkingDelta(text="x"), ToolCallStart(call_id="c", tool_name="read"),
@@ -187,7 +188,7 @@ def test_session_loop_consumes_notify_and_runs_auto_turn():
         sess = server.SessionState(run_id="loop-test", messages=[], persister=None, tracer=None)
         calls: list[str] = []
 
-        async def stub(sess, notification):
+        async def stub(sess, notification, role="subagent", status="completed", text=""):
             calls.append(notification)
             sess.event_queue.put_nowait(server.RunEnd(status="completed"))
 
@@ -218,7 +219,7 @@ def test_session_loop_waits_for_turn_lock():
         sess = server.SessionState(run_id="lock-test", messages=[], persister=None, tracer=None)
         order: list[str] = []
 
-        async def stub(sess, notification):
+        async def stub(sess, notification, role="subagent", status="completed", text=""):
             order.append("auto-turn")
 
         task = asyncio.create_task(server._session_loop(sess, run_auto_turn=stub))

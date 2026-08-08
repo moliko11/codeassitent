@@ -45,7 +45,14 @@ export type StreamEvent =
       error_type: string | null;
       agent_id: string | null;
     }
-  | { type: "ApprovalRequestEvent"; request_id: string; tool_name: string; reason: string; arguments: Record<string, unknown> };
+  | { type: "ApprovalRequestEvent"; request_id: string; tool_name: string; reason: string; arguments: Record<string, unknown> }
+  | {
+      type: "TaskNotification"; // 后台子 agent 完成通知(自动 turn 开头推,渲染系统提示行)
+      run_id: string;
+      role: string;
+      status: string;
+      text: string;
+    };
 
 export interface ChatState {
   messages: ChatMessage[];
@@ -175,6 +182,17 @@ export function eventReducer(state: ChatState, ev: StreamEvent): ChatState {
           errorMessage: ev.ok ? undefined : ev.summary || undefined,
         }),
       };
+    }
+
+    case "TaskNotification": {
+      // 后台子 agent 完成 -> 系统提示行(对齐 CLI 的 [后台任务] 打印;web/app 此前没有)
+      const notice: ChatMessage = {
+        id: "tn-" + ev.run_id.slice(0, 6) + "-" + state.messages.length,
+        role: "system",
+        content: `[后台任务] ${ev.role} 完成(status=${ev.status})`,
+        createdAt: Date.now(),
+      };
+      return { ...state, messages: [...state.messages, notice] };
     }
 
     case "RunEnd": {

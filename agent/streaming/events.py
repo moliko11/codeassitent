@@ -122,6 +122,20 @@ class ApprovalRequestEvent:
     arguments: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class TaskNotification:
+    """后台子 agent 完成通知(对齐 CC system/task_notification)。
+
+    由 session 级通知消费者(_session_loop 起自动 turn)在自动 turn 开头推给 sink,
+    经 event_queue -> web/app 渲染成"后台任务完成"系统提示行(CLI 已有 [后台任务] 打印,
+    web/app 此前没有)。web 白名单放行;CLI printer 可忽略(REPL 的 _handle_notification 已打印)。
+    """
+    run_id: str
+    role: str = "subagent"          # 子 agent role
+    status: str = "completed"       # completed/failed/stopped(对齐 CC 通知 <status>)
+    text: str = ""                  # 子 agent 结果摘要(前端可选展示)
+
+
 # ─────────────────── 低层：LLM 流式增量（adapter 发） ───────────────────
 
 @dataclass(frozen=True)
@@ -170,7 +184,7 @@ StreamEvent = Union[
     # 消息级（web 契约）
     AssistantMessage, ToolResultMessage,
     # 高层
-    RunStart, StepStart, StepEnd, RunEnd, ToolStart, ToolEnd, ApprovalRequestEvent,
+    RunStart, StepStart, StepEnd, RunEnd, ToolStart, ToolEnd, ApprovalRequestEvent, TaskNotification,
     # 低层
     TextDelta, ThinkingDelta, ToolCallStart, ToolCallDelta, ToolCallEnd, MessageEnd,
 ]

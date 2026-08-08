@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import dynamic from "next/dynamic";
-import { CheckCircle2, ChevronDown, ChevronUp, Loader2, ShieldAlert, XCircle } from "lucide-react";
+import { CheckCircle2, ChevronDown, ChevronRight, ChevronUp, Loader2, ShieldAlert, XCircle } from "lucide-react";
 import type { ToolCallView } from "@/lib/types";
 import { apiFiles, apiFileContent } from "@/lib/api";
 import { languageFromPath } from "@/lib/fileLanguage";
@@ -107,6 +107,7 @@ export default function ToolCallCard({ tc }: { tc: ToolCallView }) {
   const args = tc.arguments ?? (tc.argumentsJson ? tryParse(tc.argumentsJson) : undefined);
   const errMeta = tc.errorType ? ERROR_META[tc.errorType] : undefined;
   const [expanded, setExpanded] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);   // 整卡收起(左上角图标),隐藏参数/摘要/富视图
   // summary 太长 -> 折叠;展开逻辑(summary.length > 阈值)才给展开按钮
   const longSummary = !!tc.summary && tc.summary.length > SUMMARY_CLAMP_CHARS;
   const showClamped = !!tc.summary && longSummary && !expanded;
@@ -117,6 +118,16 @@ export default function ToolCallCard({ tc }: { tc: ToolCallView }) {
   return (
     <div className="my-1.5 rounded-lg border border-[var(--border)]/60 bg-[var(--card)]/60 px-3 py-2 text-[12.5px]">
       <div className="flex flex-wrap items-center gap-2">
+        {/* 整卡收起/展开(左上角);收起后只剩头部一行,大工具结果不再撑满聊天区 */}
+        <button
+          type="button"
+          onClick={() => setCollapsed((v) => !v)}
+          aria-label={collapsed ? "展开工具结果" : "收起工具结果"}
+          title={collapsed ? "展开" : "收起"}
+          className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-[var(--muted-foreground)] hover:bg-[var(--muted)]/60"
+        >
+          {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+        </button>
         <Icon size={13} className={m.cls} />
         <span className="font-mono font-medium text-[var(--foreground)]">{tc.toolName}</span>
         <span className="text-[var(--muted-foreground)]">{m.label}</span>
@@ -127,54 +138,63 @@ export default function ToolCallCard({ tc }: { tc: ToolCallView }) {
           <span className="text-[var(--muted-foreground)]">{Math.round(tc.elapsedMs)}ms</span>
         )}
       </div>
-      {/* Phase 1 §1.3:失败分类(错误类型图标 + 中文标签 + 原因) */}
-      {tc.phase === "error" && (
-        <div className="mt-1 flex items-start gap-1.5 rounded bg-red-500/10 px-2 py-1 text-[12px]">
-          {errMeta ? <errMeta.icon size={12} className={`mt-0.5 shrink-0 ${errMeta.cls}`} /> : <XCircle size={12} className="mt-0.5 shrink-0 text-red-500" />}
-          <div className="min-w-0">
-            <span className={`font-medium ${errMeta?.cls ?? "text-red-500"}`}>
-              {errMeta?.label ?? tc.errorType ?? "执行失败"}
-            </span>
-            {tc.errorMessage && (
-              <span className="block break-words text-[var(--muted-foreground)]">{tc.errorMessage}</span>
-            )}
-          </div>
+      {collapsed && tc.summary && (
+        <div className="mt-0.5 truncate text-[11px] text-[var(--muted-foreground)]/60" title={tc.summary}>
+          {tc.summary}
         </div>
       )}
-      {args && (
-        <pre className="mt-1 max-h-40 overflow-auto rounded bg-[var(--muted)]/40 p-1.5 text-[11px] leading-snug text-[var(--foreground)]/80">
-{JSON.stringify(args, null, 2)}
-        </pre>
-      )}
-      {showRichViewer ? (
-        <div className="mt-1">
-          <RichViewer tc={tc} />
-        </div>
-      ) : (
-        tc.summary && (
-          <div className="mt-1">
-            <div className={`text-[var(--muted-foreground)] ${showClamped ? "line-clamp-3" : ""}`}>
-              {tc.summary}
-            </div>
-            {longSummary && (
-              <button
-                type="button"
-                onClick={() => setExpanded((v) => !v)}
-                className="mt-0.5 flex items-center gap-0.5 text-[11px] text-[var(--primary)] hover:underline"
-              >
-                {expanded ? (
-                  <>
-                    <ChevronUp size={11} /> 收起
-                  </>
-                ) : (
-                  <>
-                    <ChevronDown size={11} /> 展开
-                  </>
+      {!collapsed && (
+        <>
+          {/* Phase 1 §1.3:失败分类(错误类型图标 + 中文标签 + 原因) */}
+          {tc.phase === "error" && (
+            <div className="mt-1 flex items-start gap-1.5 rounded bg-red-500/10 px-2 py-1 text-[12px]">
+              {errMeta ? <errMeta.icon size={12} className={`mt-0.5 shrink-0 ${errMeta.cls}`} /> : <XCircle size={12} className="mt-0.5 shrink-0 text-red-500" />}
+              <div className="min-w-0">
+                <span className={`font-medium ${errMeta?.cls ?? "text-red-500"}`}>
+                  {errMeta?.label ?? tc.errorType ?? "执行失败"}
+                </span>
+                {tc.errorMessage && (
+                  <span className="block break-words text-[var(--muted-foreground)]">{tc.errorMessage}</span>
                 )}
-              </button>
-            )}
-          </div>
-        )
+              </div>
+            </div>
+          )}
+          {args && (
+            <pre className="mt-1 max-h-40 overflow-auto rounded bg-[var(--muted)]/40 p-1.5 text-[11px] leading-snug text-[var(--foreground)]/80">
+{JSON.stringify(args, null, 2)}
+            </pre>
+          )}
+          {showRichViewer ? (
+            <div className="mt-1">
+              <RichViewer tc={tc} />
+            </div>
+          ) : (
+            tc.summary && (
+              <div className="mt-1">
+                <div className={`text-[var(--muted-foreground)] ${showClamped ? "line-clamp-3" : ""}`}>
+                  {tc.summary}
+                </div>
+                {longSummary && (
+                  <button
+                    type="button"
+                    onClick={() => setExpanded((v) => !v)}
+                    className="mt-0.5 flex items-center gap-0.5 text-[11px] text-[var(--primary)] hover:underline"
+                  >
+                    {expanded ? (
+                      <>
+                        <ChevronUp size={11} /> 收起
+                      </>
+                    ) : (
+                      <>
+                        <ChevronDown size={11} /> 展开
+                      </>
+                    )}
+                  </button>
+                )}
+              </div>
+            )
+          )}
+        </>
       )}
     </div>
   );

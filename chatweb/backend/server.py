@@ -36,7 +36,7 @@ from agent.streaming.sink import CompositeSink
 from agent.streaming.sse_sink import SSESink
 from agent.streaming.events import (
     RunStart, RunEnd, StreamEvent, AssistantMessage, ToolResultMessage, ToolStart,
-    ApprovalRequestEvent,
+    ApprovalRequestEvent, TaskNotification,
 )
 from agent.tracing import Tracer, TraceStore
 from agent.tracing.metrics import MetricsCollector
@@ -150,10 +150,12 @@ def build_runtime_context(state: AgentState, sink, tracer: Tracer, notify_queue:
 # 事件经 per-turn SSESink -> sess.event_queue,前端 long-poll GET /sessions/{id}/events 拉(无持久 SSE)。
 
 
-async def _run_auto_turn(sess: SessionState, notification: str):
+async def _run_auto_turn(sess: SessionState, notification: str,
+                         role: str = "subagent", status: str = "completed", text: str = ""):
     """自动 turn:合成 user 消息跑 _run_turn,事件缓冲进 sess.event_queue(对齐 REPL _handle_notification)。
     HITL 照常走 web_confirmer(set_active_sse_queue 指向本 turn 的队列 -> ApprovalRequestEvent 也进
-    event_queue,前端 /events 拉到后弹窗,POST /approve 解 future)。"""
+    event_queue,前端 /events 拉到后弹窗,POST /approve 解 future)。
+    开头先推 TaskNotification:web/app 渲染"后台任务完成"提示行(CLI 由 _handle_notification 打印)。"""
     q: asyncio.Queue = asyncio.Queue()
     set_active_sse_queue(q)
     sse_sink = SSESink(q)
@@ -165,6 +167,7 @@ async def _run_auto_turn(sess: SessionState, notification: str):
     _runtime_state.workspace.set(_workspace)
     _runtime_state.file_history.set(sess.file_history)
     try:
+        sink.emit(TaskNotification(run_id=sess.run_id, role=role, status=status, text=text))
         await _run_turn(notification, state, ctx, sess.persister)
     except Exception as e:
         state.fail({"type": "AutoTurnError", "message": str(e)})
@@ -201,7 +204,8 @@ async def _session_loop(sess: SessionState, run_auto_turn=None):
             async with sess.turn_lock:
                 try:
                     await run_auto_turn(
-                        sess, f"[task-notification] {role} 完成(status={status}):\n{text}")
+                        sess, f"[task-notification] {role} 完成(status={status}):\n{text}",
+                        role=role, status=status, text=text)
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -227,12 +231,13 @@ def _is_web_event(ev: StreamEvent) -> bool:
     """web/SSE 消费白名单(对齐 CC:web 只收消息级 + 生命周期框架,delta 只在 CLI 打字机)。
 
     放行:消息级(AssistantMessage/ToolResultMessage)+ RunStart/RunEnd 书签 + ToolStart
-    (resume/_workflow 无 LLM step 时给前端建工具卡)+ HITL(ApprovalRequestEvent 不走 sink,直接入队)。
+    (resume/_workflow 无 LLM step 时给前端建工具卡)+ HITL(ApprovalRequestEvent 不走 sink,直接入队)
+    + TaskNotification(后台子 agent 完成通知,前端渲染系统提示行)。
     吞掉:TextDelta/ThinkingDelta/ToolCall*/ToolEnd/StepStart/StepEnd/MessageEnd(delta 与机制事件,
     tracer/printer 已消费,web 无需)。前端由此拿到自包含的完整事件,不用再累积 delta。
     """
     return isinstance(ev, (RunStart, RunEnd, AssistantMessage, ToolResultMessage, ToolStart,
-                           ApprovalRequestEvent))
+                           ApprovalRequestEvent, TaskNotification))
 
 
 # ─────────────────── FastAPI app ───────────────────

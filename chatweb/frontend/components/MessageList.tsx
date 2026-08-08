@@ -52,7 +52,7 @@ function TurnSummary({ usage, durationMs, numSteps }: {
 }
 
 interface RowProps {
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "system";
   content: string;
   thinking?: string;
   toolCalls?: ToolCallView[];
@@ -64,6 +64,16 @@ interface RowProps {
 }
 
 const MessageRow = memo(function MessageRow({ role, content, thinking, toolCalls, turnUsage, durationMs, numSteps, streaming, status }: RowProps) {
+  if (role === "system") {
+    // 系统提示行:后台任务完成通知等(对齐 CLI 的 [后台任务] 打印),居中置灰
+    return (
+      <div className="flex justify-center py-0.5">
+        <span className="max-w-[85%] truncate rounded-full bg-[var(--muted)]/40 px-2.5 py-0.5 text-center text-[11px] text-[var(--muted-foreground)]">
+          {content}
+        </span>
+      </div>
+    );
+  }
   if (role === "user") {
     return (
       <div className="flex justify-end">
