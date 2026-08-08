@@ -52,6 +52,80 @@ def test_tracer_span_tree():
     assert "run" in tree and "step" in tree and "tool" in tree
 
 
+def test_tracer_multi_turn_single_run_span():
+    """多轮对话(同 Tracer 多次 RunStart/RunEnd)只建一个 run span 根。
+
+    修"火焰图多棵同名 run{id} 树":一个对话一棵树。每轮 step 都挂同一 run span,
+    RunEnd 扩展其 end(会话 duration = 首轮 start ~ 本轮 end),status 取最新一轮。
+    """
+    t = Tracer("sess-1")
+    # 第 1 轮
+    t.emit(RunStart(run_id="sess-1"))
+    t.emit(StepStart(step_index=0))
+    t.emit(StepEnd(step_index=0))
+    t.emit(RunEnd(status="completed", final_text="t1", error=None))
+    # 第 2 轮
+    t.emit(RunStart(run_id="sess-1"))
+    t.emit(StepStart(step_index=0))
+    t.emit(StepEnd(step_index=0))
+    t.emit(RunEnd(status="completed", final_text="t2", error=None))
+
+    runs = [s for s in t.trace.spans if s.type == "run"]
+    assert len(runs) == 1, f"多轮应只有 1 个 run span,实际 {len(runs)}"
+    assert runs[0].parent_id is None
+    # 4 个 step 全部挂同一个 run span
+    steps = [s for s in t.trace.spans if s.type == "step"]
+    assert len(steps) == 2
+    assert all(s.parent_id == runs[0].span_id for s in steps)
+    # run span 时长覆盖整轮对话(首轮 start ~ 末轮 end),不是只有最后一轮
+    assert runs[0].duration_ms() is not None
+    assert runs[0].attrs.get("status") == "completed"
+
+
+try:
+    from monitor.backend.server import _collapse_run_roots   # noqa: E402
+    _HAVE_MONITOR = True
+except Exception:
+    _HAVE_MONITOR = False
+
+requires_monitor = pytest.mark.skipif(not _HAVE_MONITOR,
+                                      reason="monitor.backend.server 导入失败")
+
+
+@requires_monitor
+def test_collapse_run_roots_merges_multi_turn():
+    """监控端兜底:旧 trace 多轮同名 run span 折叠成一个根(一个对话一棵树)。
+
+    保留第一个 run 作根,被折叠 run 的直接子(step)改挂到根下,丢弃多余 run span。
+    """
+    from agent.tracing.span import Span, Trace
+
+    t = Trace(run_id="s1")
+    r1 = Span(span_id="r1", parent_id=None, type="run", name="s1", start=0.0)
+    r1.finish(status="completed")
+    s1a = Span(span_id="s1a", parent_id="r1", type="step", name="0", start=0.1)
+    s1a.finish()
+    r2 = Span(span_id="r2", parent_id=None, type="run", name="s1", start=1.0)
+    r2.finish(status="completed")
+    s2a = Span(span_id="s2a", parent_id="r2", type="step", name="0", start=1.1)
+    s2a.finish()
+    for sp in (r1, s1a, r2, s2a):
+        t.add(sp)
+
+    out = _collapse_run_roots(t.spans)
+    runs = [s for s in out if s.type == "run"]
+    assert len(runs) == 1                        # 折叠后只有一个 run 根
+    roots = [s for s in out if s.parent_id is None]
+    assert len(roots) == 1 and roots[0].span_id == "r1"
+    steps = [s for s in out if s.type == "step"]
+    assert len(steps) == 2
+    assert all(s.parent_id == "r1" for s in steps)   # s2a 从 r2 改挂到 r1
+    assert len(out) == 3                              # r2 被丢弃
+    # 合并根覆盖整个对话(start=最早轮次, end=最晚已结束轮次),不是只有第一轮
+    assert runs[0].start == 0.0
+    assert runs[0].end == r2.end
+
+
 # ─────────────────── MetricsCollector ───────────────────
 
 def test_metrics_collector():

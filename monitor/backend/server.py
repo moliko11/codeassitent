@@ -127,13 +127,38 @@ def api_run(run_id: str):
     return {"meta": meta, "report": report.to_dict() if report else None}
 
 
+def _collapse_run_roots(spans: list) -> list:
+    """同名 run 根折叠:多轮同名 run span(parent=null 多个)合成一个根(一个对话一棵树)。
+
+    Tracer 已修"一个会话只建一个 run span";此处兜底旧 trace.jsonl(每轮一个同名 run span):
+    保留第一个 run 作根,其余 run 的直接子(step)改挂到根下,丢弃多余 run span。
+    只改返回前的内存对象(TraceStore.load 每请求新读),不改落盘数据。
+    """
+    runs = [s for s in spans if s.type == "run" and s.parent_id is None]
+    if len(runs) <= 1:
+        return spans
+    keep = runs[0]
+    drop_ids = {r.span_id for r in runs[1:]}
+    # 合并根覆盖整个对话:start 取最早轮次,end 取最晚已结束轮次(旧数据每轮 run 只有自己时长)
+    ends = [r.end for r in runs if r.end is not None]
+    keep.start = min(r.start for r in runs)
+    if ends:
+        keep.end = max(ends)
+    for s in spans:
+        if s.parent_id in drop_ids:
+            s.parent_id = keep.span_id   # 重挂被折叠 run 的直接子(step)到根
+    return [s for s in spans if s.span_id not in drop_ids]
+
+
 @app.get("/api/runs/{run_id}/trace")
 def api_run_trace(run_id: str):
-    """span 树 JSON(前端画火焰图)。trace.jsonl 不存在(崩了没 RunEnd,坑2)-> 404。"""
+    """span 树 JSON(前端画火焰图)。trace.jsonl 不存在(崩了没 RunEnd,坑2)-> 404。
+    _collapse_run_roots:旧数据多轮同名 run span 堆叠,返回前折叠成一个根。"""
     tp = ppaths.PERSIST_ROOT / run_id / "trace.jsonl"   # 直构,避免 run_dir 的 mkdir 副作用
     if not tp.exists():
         raise HTTPException(404, "trace not found (run 崩了没 RunEnd,坑2)")
     trace = TraceStore(run_id, path=str(tp)).load()
+    trace.spans = _collapse_run_roots(trace.spans)
     return trace.to_dict()
 
 
