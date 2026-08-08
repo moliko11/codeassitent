@@ -57,7 +57,7 @@ _registry = _rt.registry
 _guardrail_runner = _rt.guardrail_runner
 _tool_executor = _rt.tool_executor
 _memory_store = _rt.memory_store
-_workspace = Workspace(root=Path.cwd())
+_workspace = Workspace(root=Path(_config.workspace_root) if _config.workspace_root else Path.cwd())
 
 session_manager = SessionManager()
 

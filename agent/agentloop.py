@@ -248,7 +248,7 @@ async def run_agent_loop(registry: ToolRegistry,
         registry=registry, model_adapter=model_adapter, tool_executor=tool_executor,
         config=config, guardrail_runner=tool_executor.guardrail_runner,  # 阶段8
         memory_store=memory_store,  # 步6:传给 builder 分层注入
-        workspace=Workspace(root=Path.cwd()),  # 阶段8:REPL 工作空间=cwd
+        workspace=Workspace(root=Path(config.workspace_root) if config.workspace_root else Path.cwd()),  # 工作区间(config.workspace_root / AGENT_WORKSPACE)
         file_history=FileHistory(run_dir(session_run_id) / "file-history"),  # 版本链条(同旧 _init_file_history)
     )
     _write_run_start_meta(session_run_id, config.model, config.system_prompt)  # 在途 run 立即可见(问题1)

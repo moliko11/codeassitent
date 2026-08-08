@@ -76,6 +76,10 @@ def build_agent_config(overrides: dict | None = None) -> AgentConfig:
     kwargs = {k: v for k, v in cfg.items() if k in known and k != "system_prompt"}
     if overrides:
         kwargs.update({k: v for k, v in overrides.items() if k in known})
+    # AGENT_WORKSPACE env 覆盖 workspace_root(运行时切换工作区间,不用改 yaml;优先于 yaml)
+    env_ws = os.environ.get("AGENT_WORKSPACE")
+    if env_ws:
+        kwargs["workspace_root"] = env_ws
     return AgentConfig(**kwargs)
 
 

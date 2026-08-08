@@ -29,6 +29,9 @@ class AgentConfig:
     # 空 list=全允许(默认,兼容单 agent);can_use_tool(阶段0)读它做白名单:非空时只放行列表内工具。
     # Agent.run 用 dataclasses.replace 把 self.tools 写进 child_config,实现 per-agent 工具隔离。
     allowed_tools: list[str] = field(default_factory=list)
+    # 工作区间根目录(Agent 读写文件/执行命令的边界,对齐 CC cwd)。空串=启动目录 cwd。
+    # 与 persist 分离:transcript 仍落 cwd/persist(相对路径),workspace 只管文件操作范围。
+    workspace_root: str = ""
 
 
 """
