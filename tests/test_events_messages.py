@@ -224,7 +224,6 @@ def test_single_channel_spawn_turn_events_into_session_queue(tmp_path, monkeypat
     from agent.core.state import AgentState
     from agent.streaming.events import RunStart, AssistantMessage, RunEnd
 
-    monkeypatch.setattr(paths, "PERSIST_ROOT", tmp_path / "runs")
     sess = server.SessionState.create(
         registry=server._registry, model_adapter=object(), tool_executor=server._tool_executor,
         config=server._config, guardrail_runner=server._guardrail_runner,
@@ -262,7 +261,6 @@ def test_stream_gen_serves_session_queue(tmp_path, monkeypatch):
     import agent.persist.paths as paths
     from agent.streaming.events import RunStart, AssistantMessage, RunEnd
 
-    monkeypatch.setattr(paths, "PERSIST_ROOT", tmp_path / "runs")
     sess = server.SessionState.create(
         registry=server._registry, model_adapter=object(), tool_executor=server._tool_executor,
         config=server._config, guardrail_runner=server._guardrail_runner,
@@ -298,7 +296,6 @@ def test_stream_gen_resumes_from_cursor(tmp_path, monkeypatch):
     from agent.streaming.events import RunStart, AssistantMessage, RunEnd, TextDelta
     import agent.persist.paths as paths
 
-    monkeypatch.setattr(paths, "PERSIST_ROOT", tmp_path / "runs")
     sess = server.SessionState.create(
         registry=server._registry, model_adapter=object(), tool_executor=server._tool_executor,
         config=server._config, guardrail_runner=server._guardrail_runner,

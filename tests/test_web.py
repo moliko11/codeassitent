@@ -21,12 +21,6 @@ from monitor.backend.server import app
 client = TestClient(app)
 
 
-@pytest.fixture(autouse=True)
-def _tmp_persist_root(tmp_path, monkeypatch):
-    """PERSIST_ROOT 指到 tmp_path,测试落盘不污染 code/persist(同 test_persist)。"""
-    monkeypatch.setattr(paths, "PERSIST_ROOT", tmp_path / "runs")
-
-
 def _seed_run(run_id, *, status="completed", model="deepseek-v4-pro",
               usage=None, started_at=1785655927.0):
     """落一个 run:run_meta.json 侧车 + trace.jsonl(run span + step span 带 usage)。"""

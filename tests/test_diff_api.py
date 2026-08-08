@@ -30,12 +30,6 @@ requires_server = pytest.mark.skipif(
 client = TestClient(app) if _HAVE_SERVER else None
 
 
-@pytest.fixture(autouse=True)
-def _tmp_persist_root(tmp_path, monkeypatch):
-    """PERSIST_ROOT 指到 tmp_path,测试落盘不污染 code/persist(同 test_web)。"""
-    monkeypatch.setattr(paths, "PERSIST_ROOT", tmp_path / "runs")
-
-
 def _sha16(p: str) -> str:
     return hashlib.sha256(p.encode("utf-8")).hexdigest()[:16]
 

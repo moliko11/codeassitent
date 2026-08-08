@@ -31,12 +31,6 @@ from agent.tracing import aggregate_stats
 
 # ───────────────────────── 测试夹具与 helpers ─────────────────────────
 
-@pytest.fixture(autouse=True)
-def _tmp_persist_root(tmp_path, monkeypatch):
-    """把 PERSIST_ROOT 指到 tmp_path,测试落盘不污染 code/persist(同 test_persist)。"""
-    monkeypatch.setattr(persist_paths, "PERSIST_ROOT", tmp_path / "runs")
-
-
 class _UsageAdapter(BaseModelAdapter):
     """按脚本顺序返回 ModelResponse(可带 usage),计数 call_llm。
     usage 经 stream_llm 默认实现 -> MessageEnd -> Tracer 记进 step span attrs["usage"]。"""

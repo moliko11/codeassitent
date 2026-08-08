@@ -27,17 +27,6 @@ from agent.streaming.sink import NullSink
 
 # ───────────────────────── 测试夹具与 helpers ─────────────────────────
 
-@pytest.fixture(autouse=True)
-def _tmp_persist_root(tmp_path, monkeypatch):
-    """把 PERSIST_ROOT 指到 tmp_path，测试落盘不污染 code/persist。
-
-    run_dir 读模块级 PERSIST_ROOT（运行时查找），monkeypatch 改它即生效，
-    Persister / read_transcript 都跟着走 tmp。
-    """
-    from agent.persist import paths
-    monkeypatch.setattr(paths, "PERSIST_ROOT", tmp_path / "runs")
-
-
 class _ScriptedAdapter(BaseModelAdapter):
     """按脚本顺序返回 ModelResponse 的假适配器，并计数 call_llm 调用次数。
 

@@ -159,9 +159,11 @@ def _event_to_dict(ev: StreamEvent) -> dict:
 # ─────────────────── FastAPI app ───────────────────
 
 app = FastAPI(title="ez-interview agent web")
+# CORS:默认全开(本地静态导出直连);生产可 AGENT_CORS_ORIGINS=逗号分隔收紧
+_cors_origins = [o.strip() for o in os.environ.get("AGENT_CORS_ORIGINS", "*").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],        # 静态导出后前端跨源直连(CORS 全开);web/桌面同用
+    allow_origins=_cors_origins,   # 静态导出后前端跨源直连;web/桌面同用
     allow_methods=["*"],
     allow_headers=["*"],
 )

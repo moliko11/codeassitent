@@ -19,12 +19,6 @@ from agent.config.config import AgentConfig
 from agent.streaming.sink import NullSink
 
 
-@pytest.fixture(autouse=True)
-def _tmp_persist_root(tmp_path, monkeypatch):
-    """PERSIST_ROOT 指到 tmp_path,测试落盘不污染 code/persist(同 test_persist)。"""
-    monkeypatch.setattr(paths, "PERSIST_ROOT", tmp_path / "runs")
-
-
 def test_session_create_wires_persistables():
     """Session.create 按 run_id 建 Persister/Tracer/EventStore,events.jsonl 能写(落盘链路通)。"""
     sess = Session.create(

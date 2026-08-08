@@ -35,12 +35,6 @@ from agent.streaming.events import (
 )
 
 
-@pytest.fixture(autouse=True)
-def _tmp_persist_root(tmp_path, monkeypatch):
-    """PERSIST_ROOT 指到 tmp_path,测试落盘不污染 code/persist(同 test_persist)。"""
-    monkeypatch.setattr(paths, "PERSIST_ROOT", tmp_path / "runs")
-
-
 def _read_events(run_id) -> list[dict]:
     p = paths.PERSIST_ROOT / run_id / "events.jsonl"
     return [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines()]

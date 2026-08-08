@@ -1,7 +1,7 @@
 [project]
-name = "code"
+name = "ez-interview-agent"
 version = "0.1.0"
-description = "Add your description here"
+description = "面试学习用 Agent Runtime:阶段化实现的主循环 + 工具 + 上下文压缩 + 多 Agent + 三端(CLI/web/desktop)"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = ["openai", "jsonschema", "python-dotenv", "pytest", "httpx", "pyyaml"]

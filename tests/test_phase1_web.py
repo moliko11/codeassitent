@@ -21,12 +21,6 @@ from agent.persist.store import _scan_transcript_tail, set_run_title
 from agent.tools.defs import ToolCall, ToolResult
 
 
-@pytest.fixture(autouse=True)
-def _tmp_persist_root(tmp_path, monkeypatch):
-    """PERSIST_ROOT 指到 tmp_path,测试落盘不污染 code/persist/runs(同 test_web)。"""
-    monkeypatch.setattr(paths, "PERSIST_ROOT", tmp_path / "runs")
-
-
 def _mkreport():
     """_write_run_meta 需要的 MetricsCollector 结果形状。"""
     return types.SimpleNamespace(duration_ms=1000, token_input=1, token_output=2,
