@@ -19,8 +19,8 @@ INDEX_FILE = "MEMORY.md"
 
 class MemoryStore:
     def __init__(self, dir_path, recall_top_k: int = 5, index_file: str = INDEX_FILE):
-        # recall_top_k / index_file 走 memory.yaml(缺省 5 / MEMORY.md)；builder 注入召回
-        # 走 ContextBuilder.memory_recall_top_k(context.yaml),是两个独立旋钮(历史遗留)。
+        # recall_top_k / index_file 走 memory.yaml(缺省 5 / MEMORY.md);唯一旋钮,
+        # builder 注入召回也用 store 默认(不再有 context.yaml 的 memory_recall_top_k 第二套)。
         self.dir = Path(dir_path)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.recall_top_k = recall_top_k

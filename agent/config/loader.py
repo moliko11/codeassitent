@@ -8,8 +8,7 @@
 # 已知不一致（loader 只读不改，避免破坏测试）：
 # - AgentState.max_steps=5 vs AgentConfig.max_steps=25：装配点显式 AgentState(max_steps=config.max_steps)，
 #   5 只是裸构造默认。别用 YAML 动 AgentState。
-# - builder 注入召回 top_k 由 context.yaml memory_recall_top_k 控制；store 直调 recall 默认由
-#   memory.yaml recall_top_k 控制（历史遗留的两套旋钮，这里显式化）。
+# - 记忆召回 top_k 唯一旋钮 = memory.yaml recall_top_k(builder 注入与 store 直调共用,不再两套)。
 import os
 from pathlib import Path
 
@@ -166,7 +165,6 @@ def build_context_builder_params() -> dict:
         "tool_result_threshold": cfg.get("tool_result_threshold", 2000),
         "keep_recent": cfg.get("keep_recent", 5),                    # 对齐 CC keepRecent=5
         "keep_recent_turns": cfg.get("keep_recent_turns", 4),
-        "memory_recall_top_k": cfg.get("memory_recall_top_k", 3),
         "gap_threshold_minutes": cfg.get("gap_threshold_minutes", 60),  # 对齐 CC gapThresholdMinutes(短会话不清)
     }
 

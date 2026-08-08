@@ -163,17 +163,15 @@ def test_build_context_builder_params(tmp_path):
     keep_recent/gap_threshold_minutes 对齐 CC(keepRecent=5 / gapThresholdMinutes=60)。"""
     assert build_context_builder_params() == {
         "tool_result_threshold": 2000, "keep_recent": 5,
-        "keep_recent_turns": 4, "memory_recall_top_k": 3,
-        "gap_threshold_minutes": 60,
+        "keep_recent_turns": 4, "gap_threshold_minutes": 60,
     }
     _write(tmp_path, "context", {"builder": {
         "tool_result_threshold": 5000, "keep_recent": 2,
-        "keep_recent_turns": 6, "memory_recall_top_k": 5,
+        "keep_recent_turns": 6,
     }})
     assert build_context_builder_params() == {
         "tool_result_threshold": 5000, "keep_recent": 2,
-        "keep_recent_turns": 6, "memory_recall_top_k": 5,
-        "gap_threshold_minutes": 60,
+        "keep_recent_turns": 6, "gap_threshold_minutes": 60,
     }
 
 
