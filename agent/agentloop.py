@@ -216,16 +216,12 @@ async def _run_steps(state: AgentState, context: RuntimeContext, persister, subt
 
             # 逐 result 增量：durability-first（log-then-append），按完成序 yield
             tool_results = []
-            async for r in context.tool_executor.execute_many(
-                model_response.tool_calls, timeout=config.step_timeout, sink=sink
-            ):
-                # Task 工具:拦截 subagent 请求(handler 同步跑不了 async agent.run),
-                # 异步跑子 agent 用其结果替换 tool result(对标 NeedsApproval 的拦截模式)
-                if r.ok and isinstance(r.data, dict) and r.data.get("__subagent__"):
-                    r = await _run_subagent(r, context, persister)
+            subagent_tasks: list = []   # 前台子 agent 挂 task 并行跑,循环后统一收(待办 D)
+
+            def _absorb(r):
+                """吸一条 tool result 进状态/落盘/发事件(非 subagent 与前台 subagent 共用)。"""
                 # HITL(阶段0 Phase A):权限拒绝在 execute_many 内已回填 GuardrailBlocked ToolResult,
-                # 走正常 tool_result 回灌(模型下轮看到"未获确认"换方法)。waiting_approval 态留给
-                # Phase B 持久化挂起(mobile/云,resume 续跑)。
+                # 走正常 tool_result 回灌(模型下轮看到"未获确认"换方法)。
                 _emit_tool_result_message(sink, state, r)   # 源头发完整工具结果(web 契约)
                 if persister:
                     persister.log_tool_result(r)
@@ -235,6 +231,27 @@ async def _run_steps(state: AgentState, context: RuntimeContext, persister, subt
                     call_id=r.call_id, tool_name=r.tool_name, ok=r.ok,
                     error_type=r.error.get("type") if r.error else None))
                 tool_results.append(r)
+
+            async for r in context.tool_executor.execute_many(
+                model_response.tool_calls, timeout=config.step_timeout, sink=sink
+            ):
+                # Task 工具:拦截 subagent 请求(handler 同步跑不了 async agent.run),
+                # 异步跑子 agent 用其结果替换 tool result(对标 NeedsApproval 的拦截模式)
+                if r.ok and isinstance(r.data, dict) and r.data.get("__subagent__"):
+                    if r.data.get("background"):
+                        # 后台:fire-and-forget,返回快,inline 吸收
+                        _absorb(await _run_subagent(r, context, persister))
+                    else:
+                        # 前台:不 inline await,挂 task 并行跑——多个前台子 agent 不再串行
+                        # 冻住主循环(待办 D);结果在循环后按完成序统一收,保留流式 ToolResultMessage
+                        subagent_tasks.append(
+                            (r.call_id, asyncio.create_task(_run_subagent(r, context, persister))))
+                    continue
+                _absorb(r)
+
+            # 前台子 agent 并行收尾(都挂完再收,一轮拿齐全部结果)
+            for _call_id, task in subagent_tasks:
+                _absorb(await task)
 
             state.transition("running")
 

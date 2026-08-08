@@ -347,6 +347,66 @@ def test_task_tool_subagent():
                for m in tool_msgs), "子 agent 结果未回填"
 
 
+class _SleepScriptedAdapter(BaseModelAdapter):
+    """每个 LLM 调用睡 delay 秒再按脚本返回(测前台子 agent 并行:墙钟≈max 而非 sum)。"""
+
+    def __init__(self, script, delay=0.15):
+        super().__init__(api_key="", base_url="", model="")
+        self.script = list(script)
+        self.delay = delay
+        self.n = 0
+
+    async def call_llm(self, request):
+        await asyncio.sleep(self.delay)
+        resp = self.script[min(self.n, len(self.script) - 1)]
+        self.n += 1
+        return resp
+
+    def append_assistant(self, messages, model_response):
+        new = list(messages)
+        new.append(Message(role="assistant", content=model_response.text or ""))
+        return new
+
+    def append_tool_result(self, messages, result):
+        new = list(messages)
+        new.append(Message(role="tool", content=result.text or ""))
+        return new
+
+
+def test_task_foreground_parallel():
+    """待办 D:同一步两个前台子 agent 并行跑,不串行冻主循环。
+
+    串行=4×0.4=1.6s(两子 agent 各 0.4 不重叠)+build 开销≈2.2s;并行=主(0.4)+
+    两子 agent 并行(0.4)+主 final(0.4)+固定开销≈1.5s。elapsed < 1.9 证明并发。
+    delay 不能太小:每 turn 首次 build 的 git spawn + build_system_prompt 是同步固定开销,
+    小 delay 下占比大测不出差异。"""
+    from agent.agentloop import _run_turn
+    from agent.tools.task_tool import make_task_tool
+    import time
+    reg = ToolRegistry()
+    reg.register(make_task_tool())
+    script = [
+        ModelResponse(tool_calls=[
+            ToolCall(call_id="t1", tool_name="task", arguments={"description": "A", "prompt": "查 A"}),
+            ToolCall(call_id="t2", tool_name="task", arguments={"description": "B", "prompt": "查 B"}),
+        ]),
+        ModelResponse(text="A 结果"),
+        ModelResponse(text="B 结果"),
+        ModelResponse(text="done"),
+    ]
+    state = AgentState()
+    ctx = RuntimeContext(registry=reg, tool_executor=ToolExecutor(reg),
+        model_adapter=_SleepScriptedAdapter(script, delay=0.4),
+        config=AgentConfig(max_steps=5), state=state)
+    t0 = time.perf_counter()
+    s = asyncio.run(_run_turn("并行查 A 和 B", state, ctx, persister=None))
+    elapsed = time.perf_counter() - t0
+    assert s.status == "completed"
+    tool_msgs = [m for m in s.messages if getattr(m, "role", None) == "tool"]
+    assert len(tool_msgs) == 2, "两个前台子 agent 结果都应回填"
+    assert elapsed < 1.9, f"前台子 agent 未并行(串行≈2.2s),elapsed={elapsed:.2f}s"
+
+
 def test_task_tool_background():
     """Task 工具 background=true:主 agent 不阻塞,立即拿"已派出";子 agent 后台跑完 -> notify_queue 通知。"""
     from agent.agentloop import _run_subagent
