@@ -1,5 +1,6 @@
 # Ark 适配器（火山方舟 / 豆包，Responses API 协议）
 import json
+import time
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -304,9 +305,9 @@ class ArkAdapter(BaseModelAdapter):
         """追加 assistant 消息（结构化:content=text,tool_calls 存 meta）。
         text（无论是否带 tool_calls）与 function_call 项由 _to_input 展开。
         最终回答也进 messages 作历史（推翻 Decision 3）；带 tool_calls 时的 text 也进（bug3），
-        否则下一轮看不到 assistant 的说明文字。"""
+        否则下一轮看不到 assistant 的说明文字。meta.ts 打墙钟(micro_compact 时间门用)。"""
         new_messages = list(messages)
-        meta = {}
+        meta = {"ts": time.time()}
         if model_response.tool_calls:
             meta["tool_calls"] = [
                 {"call_id": tc.call_id, "tool_name": tc.tool_name, "arguments": tc.arguments}

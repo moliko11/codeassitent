@@ -62,3 +62,48 @@ def test_non_tool_messages_passthrough():
     msgs = [_user_msg("a"), Message(role="assistant", content="b")]
     out = micro_compact(msgs, keep_recent=3)
     assert out == msgs
+
+
+def _six_tool_msgs_with_assistant(last_assistant_ts):
+    """6 条工具结果(超 keep_recent=5)+ 首尾 assistant(尾带指定 ts)。"""
+    return [
+        Message(role="assistant", content="a", meta={"ts": last_assistant_ts}),
+        _tool_msg("c1", "old1"), _tool_msg("c2", "old2"),
+        _tool_msg("c3", "r3"), _tool_msg("c4", "r4"),
+        _tool_msg("c5", "r5"), _tool_msg("c6", "r6"),
+        Message(role="assistant", content="b", meta={"ts": last_assistant_ts}),
+    ]
+
+
+def test_time_gate_skips_recent_session():
+    """对齐 CC gapThresholdMinutes:距最后一条 assistant < 阈值(短会话)时不清老工具结果。"""
+    import time
+    now = time.time()
+    msgs = _six_tool_msgs_with_assistant(now - 10)   # 10 秒前(< 60min)
+    out = micro_compact(msgs, keep_recent=5, gap_threshold_minutes=60)
+    assert out == msgs   # 一条都不清(含 c1 老结果)
+
+
+def test_time_gate_clears_after_threshold():
+    """对齐 CC:距最后一条 assistant >= 阈值(2 小时)才清,且只清超过 keepRecent 的老的。"""
+    import time
+    now = time.time()
+    msgs = _six_tool_msgs_with_assistant(now - 7200)   # 2 小时前(>= 60min)
+    out = micro_compact(msgs, keep_recent=5, gap_threshold_minutes=60)
+    texts = [m.content for m in out if m.role == "tool"]
+    assert "old1" not in texts    # c1 被清(6 条超 keep_recent 5)
+    assert "old2" in texts        # c2 是最近 5 条之一,保留
+    assert "r6" in texts          # 最近 5 条都保留
+
+
+def test_time_gate_no_timestamp_skips():
+    """对齐 CC:最后一条 assistant 无时间戳(测试 mock/老数据)-> 无法判定,不清。"""
+    msgs = [
+        Message(role="assistant", content="a"),   # 无 meta.ts
+        _tool_msg("c1", "old1"), _tool_msg("c2", "old2"),
+        _tool_msg("c3", "r3"), _tool_msg("c4", "r4"),
+        _tool_msg("c5", "r5"), _tool_msg("c6", "r6"),
+        Message(role="assistant", content="b"),   # 无 meta.ts
+    ]
+    out = micro_compact(msgs, keep_recent=5, gap_threshold_minutes=60)
+    assert out == msgs

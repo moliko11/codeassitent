@@ -10,7 +10,10 @@
 #   - 已落盘的引用(persisted-output)不清--清了模型就读不回全文了
 #
 # cc 的 timeBasedMCConfig:gapThresholdMinutes=60(cache 必过期)+ keepRecent=5。
-# 本版简化:按"轮次距离"衰减(保留最近 K 个),不接 cache TTL。
+# 本版已对齐:keep_recent=5 + gap_threshold_minutes 时间门(距最后一条 assistant 消息
+# 超阈值才清;缺省 None=按轮次距离清,兼容直接调用的旧行为)。
+import time
+
 from ..core.messages import Message
 from .budget import PERSISTED_TAG
 
@@ -27,14 +30,34 @@ def _is_persisted_reference(text) -> bool:
     return isinstance(text, str) and text.startswith(PERSISTED_TAG)
 
 
-def micro_compact(messages: list[Message], keep_recent: int = 3) -> list[Message]:
+def _last_assistant_gap_minutes(messages: list[Message]) -> float | None:
+    """距最后一条 assistant 消息的分钟数(对齐 CC timeBasedMCConfig 的 gap,查 meta.ts)。
+    最后一条 assistant 无时间戳(测试 mock/老数据)或不存在 -> None,调用方跳过不清(CC 同款:not finite -> skip)。"""
+    for m in reversed(messages):
+        if m.role == "assistant":
+            ts = (m.meta or {}).get("ts")
+            if isinstance(ts, (int, float)):
+                return (time.time() - ts) / 60.0
+            return None
+    return None
+
+
+def micro_compact(messages: list[Message], keep_recent: int = 5,
+                  gap_threshold_minutes: float | None = None) -> list[Message]:
     """第 3 层压缩:清老 tool_result content 成占位(低损)。
 
     保留最后 keep_recent 个 tool_result 的原文,更早的:
       - 若是步3落盘的引用(persisted-output):保留(模型可 Read 回,无损)
       - 若是原始文本:清成 CLEARED_MESSAGE(低损)
+    时间门(对齐 CC timeBasedMCConfig):gap_threshold_minutes 非 None 时,距最后一条
+    assistant 消息不足该分钟数(或无法判定)则不清——CC 以 60min cache TTL 为界,
+    只在 cache 必过期后清,短会话不清。缺省 None=按轮次距离清(旧行为)。
     不改入参 Message 对象(新建 Message 替换)。
     """
+    if gap_threshold_minutes is not None:
+        gap = _last_assistant_gap_minutes(messages)
+        if gap is None or gap < gap_threshold_minutes:
+            return messages  # 短会话/无时间戳:不动(对齐 CC gapThresholdMinutes)
     tool_indices = [i for i, m in enumerate(messages) if _is_tool_result(m)]
     if len(tool_indices) <= keep_recent:
         return messages  # 没超过保留数,不动

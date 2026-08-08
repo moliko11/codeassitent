@@ -46,11 +46,12 @@ class ContextBuilder:
         context_budget: Optional[int] = None,
         warn_sink: Optional[Callable[[str], None]] = None,
         tool_result_threshold: int = 2000,
-        keep_recent: int = 3,
+        keep_recent: int = 5,
         summarizer: Optional[Callable[[list], str]] = None,
         keep_recent_turns: int = 4,
         memory_store: "MemoryStore | None" = None,
         memory_recall_top_k: int = 3,
+        gap_threshold_minutes: Optional[float] = None,
     ):
         """
         :param context_budget: 单次请求输入侧 token 预算上限(None=不限制)。
@@ -63,11 +64,12 @@ class ContextBuilder:
         self.context_budget = context_budget
         self.warn_sink = warn_sink
         self.tool_result_threshold = tool_result_threshold  # 步3:超此字符的工具结果落盘
-        self.keep_recent = keep_recent                      # 步4:保留最近 K 个 tool_result 原文
+        self.keep_recent = keep_recent                      # 步4:保留最近 K 个 tool_result 原文(对齐 CC keepRecent=5)
         self.summarizer = summarizer                        # 步5:超 budget 时的摘要函数(None=不摘要)
         self.keep_recent_turns = keep_recent_turns          # 步5:摘要时保留尾部 N 条
         self.memory_store = memory_store                    # 步6:长期记忆(None=不召回)
         self.memory_recall_top_k = memory_recall_top_k      # 步6:召回 top_k(context.yaml,缺省 3)
+        self.gap_threshold_minutes = gap_threshold_minutes  # 步4时间门(对齐 CC gapThresholdMinutes=60;None=按轮次清)
 
     async def build(self, state: AgentState) -> BuildResult:
         """从 state 组装发给模型的 messages。
@@ -83,8 +85,8 @@ class ContextBuilder:
                 content=f"[当前子任务]{current_plan_step}\n聚焦完成它,不要跳到其他任务。")] + messages
         # 步3 第1层(无损):超大工具结果落盘,messages 换引用
         messages = apply_tool_result_budget(messages, state.run_id, self.tool_result_threshold)
-        # 步4 第3层(低损):清老 tool_result content 成占位
-        messages = micro_compact(messages, self.keep_recent)
+        # 步4 第3层(低损):清老 tool_result content 成占位(带 CC 对齐的时间门)
+        messages = micro_compact(messages, self.keep_recent, self.gap_threshold_minutes)
         token_count = count_message_tokens(messages)
         budget = self.context_budget
         over = budget is not None and token_count > budget

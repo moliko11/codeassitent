@@ -1,5 +1,6 @@
 # OpenAI 兼容适配器（Chat Completions 协议）：DeepSeek / OpenAI 等
 import json
+import time
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -265,9 +266,9 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
         """追加 assistant 消息（结构化:content=文本,tool_calls 存 meta）。
         有 tool_calls -> meta 存结构化 tool_calls;无 tool_calls -> 纯 text assistant
         （最终回答也进 messages 作历史，推翻 Decision 3：多轮需要上一轮 final 作上下文）。
-        wire 的 tool_calls 由 _to_chat_message 从这里展开。"""
+        wire 的 tool_calls 由 _to_chat_message 从这里展开。meta.ts 打墙钟(micro_compact 时间门用)。"""
         new_messages = list(messages)
-        meta = {}
+        meta = {"ts": time.time()}
         if model_response.tool_calls:
             meta["tool_calls"] = [
                 {"call_id": tc.call_id, "tool_name": tc.tool_name, "arguments": tc.arguments}

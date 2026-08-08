@@ -160,9 +160,10 @@ def build_context_builder_params() -> dict:
     cfg = get_section("context").get("builder") or {}
     return {
         "tool_result_threshold": cfg.get("tool_result_threshold", 2000),
-        "keep_recent": cfg.get("keep_recent", 3),
+        "keep_recent": cfg.get("keep_recent", 5),                    # 对齐 CC keepRecent=5
         "keep_recent_turns": cfg.get("keep_recent_turns", 4),
         "memory_recall_top_k": cfg.get("memory_recall_top_k", 3),
+        "gap_threshold_minutes": cfg.get("gap_threshold_minutes", 60),  # 对齐 CC gapThresholdMinutes(短会话不清)
     }
 
 
