@@ -246,6 +246,9 @@ def test_edit_stale_detection(tmp_path):
     a = tmp_path / "a.txt"; a.write_text("hello", encoding="utf-8")
     _tool("read").handler(file_path=str(a))
     a.write_text("外部改", encoding="utf-8")   # mtime 变 + 内容变
+    # Windows 文件时间戳粒度粗:两次写入可能落同一 mtime,陈旧检测(cur_mtime > rec.mtime 严格大于)
+    # 不触发而走到"字符串找不到"。os.utime 强制 mtime 严格变大,与 test_edit_stale_mtime_only_no_error 一致。
+    os.utime(a, (time.time() + 10, time.time() + 10))
     with pytest.raises(ValueError, match="modified since read"):
         _tool("edit").handler(file_path=str(a), old_string="hello", new_string="hi")
 
