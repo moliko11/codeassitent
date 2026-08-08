@@ -413,6 +413,24 @@ def test_bash_timeout(tmp_path):
         _tool("bash").handler(command='python -c "import time; time.sleep(3)"', timeout=1)
 
 
+def test_bash_timeout_kills_process_tree(tmp_path):
+    """回归(修 Windows 阻塞 bug):命令 spawn 子进程并握 stdout/stderr 管道时,
+    超时仍及时抛 ToolTimeoutError(旧 naive subprocess.run 会挂到子进程结束才返回,
+    整个 agent 阻塞到 step_timeout)。"""
+    import time
+    from agent.core.errors import ToolTimeoutError
+    # 脚本 spawn 一个 10s 长子进程,继承管道;父进程立即退出
+    script = tmp_path / "spawn_child.py"
+    script.write_text(
+        'import subprocess,sys,time\n'
+        'subprocess.Popen([sys.executable,"-c","import time; time.sleep(10)"])\n'
+        'print("done")\n', encoding="utf-8")
+    t0 = time.time()
+    with pytest.raises(ToolTimeoutError):
+        _tool("bash").handler(command=f'python "{script}"', timeout=2)
+    assert time.time() - t0 < 6   # 修复后 ~2s;旧实现挂到子进程 ~10s 结束才抛
+
+
 def test_bash_captures_stderr(tmp_path):
     """stdout/stderr 正确捕获。"""
     r = _tool("bash").handler(command='python -c "import sys; print(\'err\', file=sys.stderr)"')
