@@ -1,51 +1,40 @@
-# web/session_manager.py - 多轮 chat session 管理(对齐 REPL run_agent_loop 的 session 模型)
+# web/session_manager.py - 多轮 chat session 管理(会话机制已上收 core Session)
 #
-# 对话产品是多轮(共享上下文)。agentloop()(agentloop.py:484)单次自洽会 close persister,
-# 直接用会丢上下文。所以 web 不调 agentloop,改调 _run_turn(agentloop.py:274,单轮体不收尾),
-# 由 SessionManager 管 session 级状态:一个 chat session = 一个 run_id(共享 transcript,跨轮 append)。
-# 等价于把 REPL 的 _do_turn(agentloop.py:553)HTTP 化。见 chat-template-integration §3。
+# 对话产品是多轮(共享上下文)。agentloop()(agentloop.py)单次自洽会 close persister,
+# 直接用会丢上下文。会话机制(run_id/messages/persister/tracer/event_store/notify_queue/
+# turn_lock + run_turn)已上收为 agent.session.Session,CLI REPL 与 web 共用:
+#   - REPL:run_agent_loop 直接用一个 Session(输入循环 + 控制台)
+#   - web:SessionState 继承 Session,只补 web 专属字段(event_queue/loop_task)
+# Session.run_turn 内部持 turn_lock 串行(用户 turn 与自动 turn)、同步 messages、
+# 发 RunEnd、落 run_meta;web 只负责 SSE/长轮询转发。见 chat-template-integration §3。
 import asyncio
 import json
-import time
-import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
-from agent.core.messages import Message
-from agent.persist.persister import Persister
-from agent.tracing import Tracer, TraceStore
-from agent.streaming.event_store import EventStore
+from agent.session import Session
 
 
 @dataclass
-class SessionState:
-    """一个 chat session 的跨轮状态(adapter/registry/tool_executor 跨 session 共享,这里只存 per-session)。
+class SessionState(Session):
+    """web 会话 = core Session(三端共用状态 + turn 机制) + web 专属事件缓冲。
 
-    后台通知闭环(待办 A,对齐 CC 命令队列 + processQueueIfReady):
-    - notify_queue:后台 subagent 完成通知通道(put (role, text, status));`_session_loop` 是唯一消费者,
-      通知到达即自动起一轮 turn(CC:空闲自动处理,不等用户下次发消息)
-    - turn_lock:turn 串行化(用户 turn vs 自动 turn,对齐 CC queryGuard 单占位;用户输入优先)
+    后台通知闭环(对齐 CC 命令队列 + processQueueIfReady):
+    - notify_queue(继承):后台 subagent 完成通知通道;_session_loop 是唯一消费者,
+      通知到达即自动起一轮 turn(不等用户下次发消息)
+    - turn_lock(继承):turn 串行化(用户 turn vs 自动 turn,run_turn 内部持锁)
     - event_queue:自动 turn 的事件缓冲(web 无 REPL 循环,前端 long-poll GET /sessions/{id}/events 拉)
+    - loop_task:会话级通知消费者 loop(server _start_session_loop 挂)
     """
-    run_id: str
-    messages: list  # 跨轮累积上下文(内存共享 list,同 REPL run_agent_loop L545)
-    persister: Persister          # append 模式,跨轮不 close(session 关闭才 close)
-    tracer: Tracer                # 会话级 tracer(跨轮累积 span,每轮末落 run_meta)
-    event_store: Optional[EventStore] = None   # 会话级事件流落盘(web 契约事件 -> events.jsonl,跨轮 append)
-    created_at: float = field(default_factory=time.time)
-    title: str = ""               # Phase 1 §1.1:会话标题(首轮自动推导,前端可重命名,覆写 run_meta)
-    file_history: Optional[object] = None   # Phase 2 §2.5:跨轮复用的 FileHistory(桌面 diff 数据源)
-    notify_queue: asyncio.Queue = field(default_factory=asyncio.Queue)   # 后台 subagent 完成通知通道
-    event_queue: asyncio.Queue = field(default_factory=asyncio.Queue)    # 自动 turn 事件缓冲(前端 /events 拉)
-    turn_lock: asyncio.Lock = field(default_factory=asyncio.Lock)        # turn 串行(用户/自动互斥,CC queryGuard)
-    loop_task: Optional[asyncio.Task] = None   # 会话级通知消费者 loop(server _start_session_loop 挂)
+
+    event_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+    loop_task: Optional[asyncio.Task] = None
 
     def close(self):
+        """关闭 web 会话:取消通知 loop + Session 收尾(关 persister/event_store)。"""
         if self.loop_task is not None:
             self.loop_task.cancel()
-        self.persister.close()
-        if self.event_store is not None:
-            self.event_store.close()
+        super().close()
 
 
 def make_file_history(run_id: str):
@@ -89,22 +78,20 @@ def make_file_history(run_id: str):
 
 
 class SessionManager:
-    """{run_id -> SessionState}。create/get/close。不碰 state(adapter/registry 由 server 装配共享)。"""
+    """{run_id -> SessionState}。create/get/close。不碰共享运行时依赖(由 server 装配传入)。"""
 
     def __init__(self):
         self._sessions: dict[str, SessionState] = {}
 
-    def create(self) -> SessionState:
-        run_id = str(uuid.uuid4())
-        sess = SessionState(
-            run_id=run_id,
-            messages=[],
-            persister=Persister(run_id),
-            tracer=Tracer(run_id, store=TraceStore(run_id)),
-            file_history=make_file_history(run_id),   # Phase 2 §2.5:桌面 diff 数据源
-            event_store=EventStore(run_id),           # 事件流落盘:web 契约事件 -> events.jsonl
+    def create(self, *, registry, model_adapter, tool_executor, config,
+               guardrail_runner=None, memory_store=None, workspace=None) -> SessionState:
+        """新建 web 会话(用 server 装配好的共享运行时依赖;SessionState 继承 Session.create)。"""
+        sess = SessionState.create(
+            registry=registry, model_adapter=model_adapter, tool_executor=tool_executor,
+            config=config, guardrail_runner=guardrail_runner, memory_store=memory_store,
+            workspace=workspace,
         )
-        self._sessions[run_id] = sess
+        self._sessions[sess.run_id] = sess
         return sess
 
     def get(self, run_id: str) -> Optional[SessionState]:

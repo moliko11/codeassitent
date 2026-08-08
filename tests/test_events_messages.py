@@ -206,32 +206,7 @@ def test_session_loop_consumes_notify_and_runs_auto_turn():
     ev = sess.event_queue.get_nowait()
     assert isinstance(ev, server.RunEnd)      # 自动 turn 事件进 event_queue
 
-
-@requires_server
-def test_session_loop_waits_for_turn_lock():
-    """待办 A:用户 turn 在跑(持锁)时,通知 turn 等待(用户输入优先,对齐 CC 优先级 next > later);
-    锁释放后才自动起 turn,不抢用户。"""
-    from chatweb.backend import server
-
-    async def _run():
-        sess = server.SessionState(run_id="lock-test", messages=[], persister=None, tracer=None)
-        order: list[str] = []
-
-        async def stub(sess, notification, role="subagent", status="completed", text=""):
-            order.append("auto-turn")
-
-        task = asyncio.create_task(server._session_loop(sess, run_auto_turn=stub))
-        await sess.turn_lock.acquire()        # 模拟用户 turn 持锁
-        sess.notify_queue.put_nowait(("subagent", "text", "completed"))
-        await asyncio.sleep(0.02)
-        assert order == []                    # 自动 turn 在等锁,不抢先
-        sess.turn_lock.release()
-        await asyncio.sleep(0.02)
-        assert order == ["auto-turn"]         # 锁释放后自动起 turn
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+    # 注:turn 串行语义(用户 turn vs 自动 turn 互斥)已上收到 Session.run_turn 内部持锁,
+    # 见 tests/test_session.py::test_run_turn_serializes_on_turn_lock(原锁测试已迁走)。
 
     asyncio.run(_run())

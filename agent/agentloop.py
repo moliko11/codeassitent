@@ -678,60 +678,33 @@ async def run_agent_loop(registry: ToolRegistry,
         pass
     printer = StreamingPrinter()
     config = config or AgentConfig()
-    # 会话级单 run_id（对齐 CC）：整个 REPL session 共用一个 transcript.jsonl，跨轮 append；
+    # 会话级单 run_id（对齐 CC）：整个 REPL session 共用一个 transcript/events，跨轮 append；
     # 退出时才写 run_end。崩在中途无 run_end -> resume 按最后状态续跑（durability-first 的保证）。
+    # 会话机制(run_id/messages/persister/tracer/event_store/notify_queue/turn_lock + turn 组装)
+    # 全在 core Session;本函数只留"输入循环 + 控制台渲染"(前端差异留在前端)。
+    from .session import Session
     session_run_id = str(uuid.uuid4())
-    from .streaming.sink import CompositeSink
-    from .tracing import Tracer, TraceStore
-    tracer = Tracer(session_run_id, store=TraceStore(session_run_id))
-    from .streaming.event_store import EventStore
-    event_store = EventStore(session_run_id)   # 事件流落盘:web 契约事件 -> events.jsonl(会话级,跨轮 append)
-    messages: list = []               # 跨轮累积上下文（内存共享 list）
-    persister = Persister(session_run_id)
+    session = Session.create(
+        run_id=session_run_id,
+        registry=registry, model_adapter=model_adapter, tool_executor=tool_executor,
+        config=config, guardrail_runner=tool_executor.guardrail_runner,  # 阶段8
+        memory_store=memory_store,  # 步6:传给 builder 分层注入
+        workspace=Workspace(root=Path.cwd()),  # 阶段8:REPL 工作空间=cwd
+        file_history=FileHistory(run_dir(session_run_id) / "file-history"),  # 版本链条(同旧 _init_file_history)
+    )
     _write_run_start_meta(session_run_id, config.model, config.system_prompt)  # 在途 run 立即可见(问题1)
-    _init_file_history(session_run_id, True)   # 版本链条:REPL 持久化,按 session_run_id 初始化
-    _runtime_state.model_adapter.set(model_adapter)   # 步3 WebFetch 用
-    _runtime_state.workspace.set(Workspace(root=Path.cwd()))  # 阶段8:REPL 工作空间=cwd
-    notify_queue = asyncio.Queue()  # 后台 subagent 完成通知通道(put (role, text);commit 9 注入)
     last_state = None
 
     async def _do_turn(user_input: str) -> AgentState:
-        """跑一轮:新 state + context + _run_turn + messages 同步。REPL 输入与 notification 复用。"""
-        nonlocal messages, last_state
-        # 每轮新 state（step_index 从 0，max_steps 是单轮上限），但共用 run_id + messages
-        state = AgentState(run_id=session_run_id, max_steps=config.max_steps)
-        state.session_id = session_run_id
-        state.messages = messages     # 继承跨轮上下文（首轮空，_run_turn 加 system）
-        context = RuntimeContext(
-            registry=registry,
-            model_adapter=model_adapter,
-            tool_executor=tool_executor,
-            config=config,
-            state=state,
-            sink=CompositeSink(printer, tracer, event_store),
-            persist=True,
-            guardrail_runner=tool_executor.guardrail_runner,  # 阶段8
-            memory_store=memory_store,  # 步6:传给 builder 分层注入
-            notify_queue=notify_queue,  # commit 9:后台 subagent 通知通道
-        )
-        # 文本/工具进度已在运行中由 StreamingPrinter 实时流式打印。
-        # _run_turn 往 state.messages append user(in-place)；但 append_assistant/tool_result 返回
-        # 新 list(copy)，state.messages 会离开共享 messages 对象，故每轮结束用 messages = state.messages
-        # 同步（见下），否则下一轮丢失上一轮 assistant + tool_result（bug2）。
-        context.sink.emit(RunStart(run_id=session_run_id))   # 走 CompositeSink(printer+tracer),让 tracer 收到 RunStart 建 run span
-        state = await _run_turn(user_input, state, context, persister)
-        _emit_run_end(state, context.sink)   # 走 CompositeSink -> tracer 收 RunEnd 落盘 trace.jsonl(修 REPL 无 trace 的坑)
-        # 每轮末尾:聚合 Metrics(会话级累计)+ 打印 token + 增量落盘 run_meta
-        # 增量写:每轮结束就落盘(累计),崩在下一轮前也保留到最近完成的轮(用户要求,不依赖 exit)
+        """跑一轮(会话机制全在 session.run_turn:组装/同步/RunEnd/run_meta)。输入与通知复用。"""
+        nonlocal last_state
+        state = await session.run_turn(user_input, printer)
+        # 每轮 token 打印(REPL 专属;本轮用 state 累计,累计用 MetricsCollector 跨所有 span 含子 agent)
         from .tracing.metrics import MetricsCollector
-        rep = MetricsCollector().collect(tracer.trace)
-        # 本轮 token 用 state 累计(对齐 RunEnd.usage,不含子 agent——子 agent 各自 state 累计;
-        # 累计 用 MetricsCollector 跨所有 span 含子 agent,是会话总账)
+        rep = MetricsCollector().collect(session.tracer.trace)
         print(f"  [本轮 in:{state.token_input} out:{state.token_output} "
               f"cache:{state.token_cached}({_rate(state.token_cached, state.token_input)}) / "
               f"累计 in:{rep.token_input} out:{rep.token_output} cache:{rep.token_cached}({_rate(rep.token_cached, rep.token_input)})]")
-        _write_run_meta(state, rep, config.model)
-        messages = state.messages   # 同步共享 list（append 返回 copy，state.messages 已离开原对象）
         last_state = state
         return state
 
@@ -753,7 +726,7 @@ async def run_agent_loop(registry: ToolRegistry,
             print()   # 上一行是未换行的 "User: ",先补换行,避免 [后台任务]/流式输出打同一行
             input_prompt_shown = False
         print(f"  [后台任务] {role} 完成(status={status}),已注入主 agent 处理…")
-        await _do_turn(f"[task-notification] {role} 完成(status={status}):\n{text}")
+        await _do_turn(session.notification_input(role, text, status))
         if input_task is not None and not input_task.done():
             print("User: ", end="", flush=True)   # 重打 prompt(无换行),标记行未结束
             input_prompt_shown = True
@@ -762,8 +735,8 @@ async def run_agent_loop(registry: ToolRegistry,
         while True:
             # 1. 排干后台 subagent notification(作为 user 消息注入,对标 CC messageQueueManager)。
             #    notification 不读 input,直接进 turn 让 agent 处理后台 subagent 的结果。
-            while not notify_queue.empty():
-                role, text, status = notify_queue.get_nowait()
+            while not session.notify_queue.empty():
+                role, text, status = session.notify_queue.get_nowait()
                 await _handle_notification(role, text, status)
             # 2. 竞速:用户输入 vs 新通知(对标 CC 命令队列非空即自动处理)。
             #    通知到达即自动触发新 turn(不用按回车);input_task 跨轮复用绝不 cancel
@@ -772,7 +745,7 @@ async def run_agent_loop(registry: ToolRegistry,
             if input_task is None:
                 input_task = asyncio.create_task(_ainput("User: "))
                 input_prompt_shown = True   # prompt 显示中(阻塞等输入),行未结束
-            notify_task = asyncio.create_task(notify_queue.get())
+            notify_task = asyncio.create_task(session.notify_queue.get())
             done, _ = await asyncio.wait(
                 {input_task, notify_task}, return_when=asyncio.FIRST_COMPLETED)
             if notify_task not in done:
@@ -791,15 +764,14 @@ async def run_agent_loop(registry: ToolRegistry,
                     await _do_turn(user_input)
         # session 正常退出：写 run_end（用最后一轮 status）；崩在 finally 前则不写 -> resume 续跑
         if last_state is not None:
-            persister.log_run_end(last_state.status, last_state.error)
-        # 阶段9:session 退出聚合 Metrics(run_meta 已在每轮 _do_turn 增量落盘,这里只打印)
+            session.close(status=last_state.status, error=last_state.error)
+        # 阶段9:session 退出聚合 Metrics(run_meta 已每轮增量落盘,这里只打印)
         from .tracing.metrics import MetricsCollector
-        rep = MetricsCollector().collect(tracer.trace)
+        rep = MetricsCollector().collect(session.tracer.trace)
         print(f"[trace] session {rep.status} steps={rep.step_count} tools={rep.tool_count} "
               f"tokens={rep.token_total} tool_ok={rep.tool_success_rate:.0%}", file=sys.stderr)
     finally:
-        persister.close()
-        event_store.close()
+        session.close()   # 幂等:正常退出已 close,异常路径兜底
 
 def main():
     # 用 tools 子包的默认 registry：@tool 装饰器把 getnowtime 注册到了那里
