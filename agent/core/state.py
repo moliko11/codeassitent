@@ -162,11 +162,9 @@ class AgentState:
     step_index: int = 0
 
     consecutive_tool_failures: int = 0 # 连续工具调用失败次数
-    # 最大循环轮次，超过则停止
+    # 最大循环轮次，超过则停止(运行路径由 Session/agentloop 从 config.max_steps 注入;裸构造默认仅测试兜底)
     max_steps: int = 5
 
-    current_step: AgentStep | None = None # 当前Agent循环轮次（可选）
-    
     pending_tool_calls: list[Any] = field(default_factory=list) # 当前轮次未完成的工具调用（可选）
 
     tool_history: list[Any] = field(default_factory=list) # 扁平化的所有tool_call记录
@@ -188,7 +186,6 @@ class AgentState:
     token_total: int = 0
     token_cached: int = 0
 
-    version: int = 0  # 乐观锁版本号，每次状态变更 +1
     # Agent循环元数据
     meta: dict[str, Any] = field(default_factory=dict)
 
@@ -200,41 +197,7 @@ class AgentState:
             raise IllegalTransitionError(self.status, to)
         self.status = to
         self.updated_at = time.perf_counter()   # 顺手解决 updated_at 不更新的老问题
-        self.version += 1 # 乐观锁版本号+1
         return self
-    def try_apply(self,fn, expected_version: int) -> bool:
-        """
-        乐观锁：仅当 version 未变时应用 fn。
-        
-        Args:
-            fn: 修改状态的函数，接受 self 作为参数
-            expected_version: 调用方期望的版本号（读取状态时获取）
-        
-        Returns:
-            bool: True 表示修改成功，False 表示版本冲突（需重试）
-        
-        Example:
-            state = load_state(session_id)
-            expected = state.version
-            
-            def modify(s):
-                s.transition("running")
-            
-            if state.try_apply(modify, expected):
-                # 修改成功
-                save_state(state)
-            else:
-                # 冲突：重新读取并重试
-                state = load_state(session_id)
-                # ...
-        
-        Note:
-            当前单线程下恒成功，此方法是为阶段 10 多 Agent 共享状态铺路。
-        """
-        if self.version != expected_version:
-            return False
-        fn(self)
-        return True
 
     def record_error(self):
         """记录一次工具调用失败，连续失败计数+1"""
@@ -300,7 +263,6 @@ class AgentState:
             "step_index": self.step_index,
             "consecutive_tool_failures": self.consecutive_tool_failures,
             "max_steps": self.max_steps,
-            "current_step": self.current_step.to_dict() if self.current_step else None,
             "pending_tool_calls": _ser(self.pending_tool_calls),
             "tool_history": _ser(self.tool_history),
             "status": self.status,
@@ -309,7 +271,6 @@ class AgentState:
             "final_response": _ser(self.final_response),
             "error": self.error,
             "meta": self.meta,
-            "version": self.version,
         }
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AgentState":
@@ -327,7 +288,6 @@ class AgentState:
             step_index=data.get("step_index", 0),
             consecutive_tool_failures=data.get("consecutive_tool_failures", 0),
             max_steps=data.get("max_steps", 5),
-            current_step=AgentStep.from_dict(data["current_step"]) if data.get("current_step") else None,
             pending_tool_calls=data.get("pending_tool_calls", []),
             tool_history=data.get("tool_history", []),
             status=data.get("status", "created"),
@@ -336,6 +296,5 @@ class AgentState:
             final_response=data.get("final_response"),
             error=data.get("error"),
             meta=data.get("meta", {}),
-            version=data.get("version"),
         )
         return state

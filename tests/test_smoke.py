@@ -108,7 +108,6 @@ def test_state_json_roundtrip():
     s2 = AgentState.from_dict(json.loads(js))
     assert s2.status == s.status
     assert s2.should_continue() == s.should_continue()
-    assert s2.version == s.version  # P1-2 version 往返
     assert len(s2.tool_history) == len(s.tool_history)
     assert len(s2.steps) == len(s.steps)
 
@@ -119,19 +118,6 @@ def test_illegal_transition_raises():
     s.transition("running")
     with pytest.raises(IllegalTransitionError):
         s.transition("running")  # running 后继不含 running
-
-
-def test_try_apply_cas():
-    """P0-3：try_apply 乐观锁，版本匹配才应用，冲突拒绝。"""
-    s = AgentState()
-    s.transition("running")
-    v = s.version
-
-    def to_waiting(st):
-        st.transition("waiting_tool")
-
-    assert s.try_apply(to_waiting, v) is True      # 版本匹配，成功
-    assert s.try_apply(to_waiting, 999) is False   # 版本不匹配，拒绝
 
 
 # ───────────────────────── P0 回归 ─────────────────────────
