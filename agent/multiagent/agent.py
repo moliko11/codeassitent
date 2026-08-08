@@ -66,7 +66,9 @@ class Agent:
         返回子 AgentState(含 final_response)。persister=None 不落盘(§8.3);传 persister 则子 agent
         事件落该 transcript(Task 工具传主 persister + agent_id="subagent",web 可展示子 agent 流)。
         """
-        # commit 10:设当前 agent role(多 Agent tracing;Tracer 把它写进 span attrs)
+        # commit 10:设当前 agent role(多 Agent tracing;Tracer 把它写进 span attrs),
+        # 跑完恢复父的 role(否则子 agent 的 role 泄漏到父后续事件)。
+        _prev_agent_id = _runtime_state.agent_id.get()
         _runtime_state.agent_id.set(self.role)
 
         # 子 agent 隔离:轻量 Session(共享 registry/adapter/sink/workspace,独立 config+state)。
@@ -97,4 +99,7 @@ class Agent:
             task_msg = f"{task}\n\n[共享黑板]\n{blackboard.snapshot()}"
 
         # 复用 Session.run_turn(react/plan_execute/workflow 由 child_config.mode 决定)
-        return await child.run_turn(task_msg, self.runtime.sink, finalize=False)
+        try:
+            return await child.run_turn(task_msg, self.runtime.sink, finalize=False)
+        finally:
+            _runtime_state.agent_id.set(_prev_agent_id)   # 恢复父 role,防泄漏

@@ -125,24 +125,23 @@ class Session:
             guardrail_runner=self.guardrail_runner, memory_store=self.memory_store,
             workspace=self.workspace, notify_queue=self.notify_queue,
         )
-        _runtime_state.model_adapter.set(self.model_adapter)
-        _runtime_state.workspace.set(self.workspace)
-        if self.file_history is not None:
-            _runtime_state.file_history.set(self.file_history)
-        try:
-            async with self.turn_lock:
-                if notification is not None:
-                    role, text, status = notification
-                    sink.emit(TaskNotification(run_id=self.run_id, role=role, status=status, text=text))
-                sink.emit(RunStart(run_id=self.run_id))
-                try:
-                    state = await _run_turn(user_input, state, ctx, self.persister)
-                finally:
-                    # 锁内同步 messages:任何退出路径都 sync,防自动 turn 拿到过期上下文
-                    self.messages = state.messages
-        except Exception as e:
-            if not state.is_terminal():
-                state.fail({"type": type(e).__name__, "message": str(e)})
+        # 单一注入点(turn_context 统一设 model_adapter/workspace/file_history 并退出恢复,
+        # 根除 _runtime_state 手动 .set() 泄漏;多 Agent/REPL/web 同一套)
+        with _runtime_state.turn_context(self.model_adapter, self.workspace, self.file_history):
+            try:
+                async with self.turn_lock:
+                    if notification is not None:
+                        role, text, status = notification
+                        sink.emit(TaskNotification(run_id=self.run_id, role=role, status=status, text=text))
+                    sink.emit(RunStart(run_id=self.run_id))
+                    try:
+                        state = await _run_turn(user_input, state, ctx, self.persister)
+                    finally:
+                        # 锁内同步 messages:任何退出路径都 sync,防自动 turn 拿到过期上下文
+                        self.messages = state.messages
+            except Exception as e:
+                if not state.is_terminal():
+                    state.fail({"type": type(e).__name__, "message": str(e)})
         if finalize:
             # 收尾(发 RunEnd + 落 run_meta)。子 agent(finalize=False)不发 turn 边界事件、
             # 不写 run_meta——它是父 run 的一部分,事件经共享 sink 进父 trace/events。

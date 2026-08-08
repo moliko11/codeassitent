@@ -163,14 +163,14 @@ async def continue_loop(state: AgentState, context: RuntimeContext) -> AgentStat
     # 否则 model_adapter/workspace/file_history 全 None -> WebFetch 坏、edit/write 跳权限校验、
     # 无备份/rewind、read_file_state 空 -> Edit 报"先读后改"(阶段5 验收 resume 涉文件任务必崩)。
     _init_file_history(state.run_id, context.persist)
-    _runtime_state.model_adapter.set(context.model_adapter)
-    _runtime_state.workspace.set(context.workspace)
-    sink.emit(RunStart(run_id=state.run_id))
-    # 续跑重置步数计数：max_steps 是单轮上限，重放出的历史 steps 不该吃掉续跑预算。
-    # steps 保留为历史轨迹（审计/重放），step_index 仅控制"还能跑几步"。
-    state.step_index = 0
-    await _execute_pending(state, context, persister)
-    state = await _run_steps(state, context, persister)
+    # 单一注入点(turn_context 统一设 model_adapter/workspace 并退出恢复)
+    with _runtime_state.turn_context(context.model_adapter, context.workspace):
+        sink.emit(RunStart(run_id=state.run_id))
+        # 续跑重置步数计数：max_steps 是单轮上限，重放出的历史 steps 不该吃掉续跑预算。
+        # steps 保留为历史轨迹（审计/重放），step_index 仅控制"还能跑几步"。
+        state.step_index = 0
+        await _execute_pending(state, context, persister)
+        state = await _run_steps(state, context, persister)
     _end_run(state, sink, persister, event_store=event_store)
     return state
 
@@ -195,11 +195,10 @@ async def agentloop(user_input: str, context: RuntimeContext) -> AgentState:
     if context.persist:
         _write_run_start_meta(state.run_id, config.model, config.system_prompt)  # 在途 run 立即可见(问题1)
     _init_file_history(state.run_id, context.persist)   # 版本链条:按 run_id 初始化 file_history
-    _runtime_state.model_adapter.set(context.model_adapter)   # 步3 WebFetch 用
-    _runtime_state.workspace.set(context.workspace)  # 阶段8:路径权限(None=退回 Path.resolve)
-
-    sink.emit(RunStart(run_id=state.run_id))
-    state = await _run_turn(user_input, state, context, persister)
+    # 单一注入点(turn_context 统一设 model_adapter/workspace 并退出恢复)
+    with _runtime_state.turn_context(context.model_adapter, context.workspace):
+        sink.emit(RunStart(run_id=state.run_id))
+        state = await _run_turn(user_input, state, context, persister)
     _end_run(state, sink, persister, event_store=event_store)
     # 阶段9:run 结束聚合 Metrics(打印到 stderr)
     from .tracing.metrics import MetricsCollector
