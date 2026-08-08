@@ -55,7 +55,8 @@ export type StreamEvent =
       role: string;
       status: string;
       text: string;
-    };
+    }
+  | { type: "TextDelta"; text: string }; // 逐 token 文本增量(前端累加进当前气泡,打字机效果)
 
 export interface ChatState {
   messages: ChatMessage[];
@@ -128,6 +129,11 @@ export function eventReducer(state: ChatState, ev: StreamEvent): ChatState {
         streaming: true,
         createdAt: Date.now(),
       };
+      // 定稿:delta 占位气泡(正在逐字流式)由 AssistantMessage(权威全文)替换,而非再新建一条
+      const last = state.messages[state.messages.length - 1];
+      if (last?.role === "assistant" && last._deltaStreaming) {
+        return { ...state, messages: [...state.messages.slice(0, -1), msg], streaming: true };
+      }
       return { ...state, messages: [...state.messages, msg], streaming: true };
     }
 
@@ -188,6 +194,28 @@ export function eventReducer(state: ChatState, ev: StreamEvent): ChatState {
           errorMessage: ev.ok ? undefined : ev.summary || undefined,
         }),
       };
+    }
+
+    case "TextDelta": {
+      // 逐 token 文本增量(打字机):追加到当前 delta 占位气泡;没有(新一轮文本开头)就建占位。
+      // 该步的 AssistantMessage(权威全文)到达时定稿替换。
+      const last = state.messages[state.messages.length - 1];
+      if (last?.role === "assistant" && last._deltaStreaming) {
+        return {
+          ...state,
+          messages: [...state.messages.slice(0, -1), { ...last, content: last.content + ev.text }],
+          streaming: true,
+        };
+      }
+      const ph: ChatMessage = {
+        id: "delta-" + Date.now() + "-" + state.messages.length,
+        role: "assistant",
+        content: ev.text,
+        streaming: true,
+        _deltaStreaming: true,
+        createdAt: Date.now(),
+      };
+      return { ...state, messages: [...state.messages, ph], streaming: true };
     }
 
     case "TaskNotification": {

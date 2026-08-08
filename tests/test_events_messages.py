@@ -158,8 +158,8 @@ requires_server = pytest.mark.skipif(not _HAVE_SERVER,
 
 
 def test_is_web_event_whitelist():
-    """web 只收消息级 + 书签 + ToolStart + HITL + 后台通知;delta/机制事件全吞(CLI/tracer 已消费)。
-    契约单点在 streaming.events.is_web_event:server SSE 过滤与 EventStore 落盘(events.jsonl)共用。"""
+    """web 契约:消息级 + 书签 + ToolStart + HITL + 后台通知 + TextDelta(逐字流式文本)。
+    TextDelta 是 web 事件但 EventStore 落盘跳过(见 test_event_store:events.jsonl 无 delta)。"""
     assert is_web_event(RunStart(run_id="r")) is True
     assert is_web_event(RunEnd(status="completed")) is True
     assert is_web_event(AssistantMessage(run_id="r", uuid="u", text="hi")) is True
@@ -167,8 +167,9 @@ def test_is_web_event_whitelist():
     assert is_web_event(ToolStart(call_id="c", tool_name="read", arguments={})) is True
     assert is_web_event(ApprovalRequestEvent(request_id="x", tool_name="bash", reason="r", arguments={})) is True
     assert is_web_event(TaskNotification(run_id="r", status="completed", text="x")) is True
+    assert is_web_event(TextDelta(text="x")) is True   # 逐字流式文本
 
-    for ev in (StepStart(step_index=0), StepEnd(step_index=0), TextDelta(text="x"),
+    for ev in (StepStart(step_index=0), StepEnd(step_index=0),
                ThinkingDelta(text="x"), ToolCallStart(call_id="c", tool_name="read"),
                ToolCallDelta(call_id="c", arguments_delta="{}"), ToolCallEnd(call_id="c"),
                ToolEnd(call_id="c", tool_name="read", ok=True), MessageEnd()):

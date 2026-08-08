@@ -35,6 +35,9 @@ export interface ChatMessage {
   streaming?: boolean;
   status?: "running" | "completed" | "failed";
   createdAt: number;
+  // 内部:TextDelta 累加中的占位气泡标记(streaming 但尚未被 AssistantMessage 定稿)。
+  // reducer 靠它把 delta 追加到正确气泡,并在 AssistantMessage 到达时替换而非新建。
+  _deltaStreaming?: boolean;
 }
 
 // HITL 批准请求(后端 ApprovalRequestEvent 对齐)

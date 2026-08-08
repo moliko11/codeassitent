@@ -191,19 +191,22 @@ StreamEvent = Union[
 
 
 # ─────────────────── web/SSE 前端消费契约（单点定义）───────────────────
-# 前端只看这 7 种自包含事件(对齐 server.py 旧 _is_web_event + 前端 lib/events.ts):
+# 前端看这些事件(对齐前端 lib/events.ts):
 #   消息级(AssistantMessage/ToolResultMessage)+ RunStart/RunEnd 书签 + ToolStart
 #   (resume/_workflow 无 LLM step 时给前端建工具卡)+ HITL(ApprovalRequestEvent)+
-#   后台通知(TaskNotification)。delta/机制事件(TextDelta/ThinkingDelta/ToolCall*/ToolEnd/
-#   StepStart/StepEnd/MessageEnd)只给 CLI 打字机与 tracer,web 不需要。
-# 单点定义的作用:server SSE 过滤(web 能看到什么)与 EventStore 落盘(events.jsonl 持久化
-# "给前端的事件流")共用同一判定,前端 events.ts 是它的 TS 镜像,不会各写一套。
+#   后台通知(TaskNotification)+ TextDelta(逐字流式文本,前端累加进当前气泡)。
+# 其余机制事件(ThinkingDelta/ToolCall*/ToolEnd/StepStart/StepEnd/MessageEnd)只给
+# CLI 打字机与 tracer,web 不需要。
+# 注意:TextDelta 虽是 web 事件(要实时流式),但 EventStore 落盘会跳过它——events.jsonl
+# 保持消息级(AssistantMessage 带权威全文),delta 是瞬时流式不落盘(见 event_store.py)。
+# 单点定义的作用:server SSE 过滤(web 能看到什么)与前端事件流共用同一判定,
+# 前端 events.ts 是它的 TS 镜像,不会各写一套。
 WEB_EVENT_TYPES = (
     RunStart, RunEnd, AssistantMessage, ToolResultMessage,
-    ToolStart, ApprovalRequestEvent, TaskNotification,
+    ToolStart, ApprovalRequestEvent, TaskNotification, TextDelta,
 )
 
 
 def is_web_event(ev: StreamEvent) -> bool:
-    """事件是否属于 web/SSE 前端消费契约(EventStore 持久化 / server SSE 过滤共用)。"""
+    """事件是否属于 web/SSE 前端消费契约(server SSE 过滤用;EventStore 落盘额外跳过 delta)。"""
     return isinstance(ev, WEB_EVENT_TYPES)

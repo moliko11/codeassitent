@@ -71,6 +71,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const approvalTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const streamRef = useRef<EventSource | null>(null);   // 会话事件流(单通道)
   const processedApprovalIdsRef = useRef<Set<string>>(new Set());   // 已处理过的 HITL 请求(防重连补发重复弹窗)
+  const pendingDeltaRef = useRef("");   // TextDelta 累积缓冲(rAF 合并,对齐 Shannon stream.ts)
+  const deltaRafRef = useRef<number | null>(null);
 
   const refreshSessions = useCallback(async () => {
     try {
@@ -154,10 +156,25 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   );
 
   // ── 会话事件流(单通道):一条 EventSource 订阅全部事件(用户/自动 turn + HITL) ──
+  // TextDelta 逐字流式:rAF 合并(每帧一次 setMessages,避免逐 token re-render,对齐 Shannon stream.ts)。
+  const flushDelta = useCallback(() => {
+    if (deltaRafRef.current) {
+      cancelAnimationFrame(deltaRafRef.current);
+      deltaRafRef.current = null;
+    }
+    if (!pendingDeltaRef.current) return;
+    const text = pendingDeltaRef.current;
+    pendingDeltaRef.current = "";
+    setMessages((prev) =>
+      eventReducer({ messages: prev, streaming: true }, { type: "TextDelta", text }).messages,
+    );
+  }, []);
+
   const closeStream = useCallback(() => {
+    flushDelta();   // 关流前刷掉残余 delta(不丢末尾几个字)
     streamRef.current?.close();
     streamRef.current = null;
-  }, []);
+  }, [flushDelta]);
 
   const openStream = useCallback(
     (id: string) => {
@@ -168,7 +185,14 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           const ev = JSON.parse(e.data) as StreamEvent;
           if (ev.type === "ApprovalRequestEvent") {
             handleApprovalEvent(ev);
+          } else if (ev.type === "TextDelta") {
+            // 逐字流式:进缓冲,rAF 合并一次刷给 reducer(占位气泡累加)
+            pendingDeltaRef.current += ev.text;
+            if (!deltaRafRef.current) {
+              deltaRafRef.current = requestAnimationFrame(flushDelta);
+            }
           } else {
+            flushDelta();   // 非 delta 事件先刷掉缓冲,保证顺序(AssistantMessage 需见到占位才能定稿替换)
             setMessages((prev) => eventReducer({ messages: prev, streaming: true }, ev).messages);
             // RunStart/RunEnd 驱动 UI streaming 状态(POST /turn 只触发,不再流回)
             if (ev.type === "RunStart") setIsStreaming(true);
@@ -181,7 +205,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       es.onerror = () => setIsStreaming(false);   // 流断开保守压掉 streaming(EventSource 自动重连,断期间事件在服务端队列缓冲)
       streamRef.current = es;
     },
-    [closeStream, handleApprovalEvent],
+    [closeStream, handleApprovalEvent, flushDelta],
   );
 
   useEffect(() => () => closeStream(), [closeStream]);   // 卸载时关流

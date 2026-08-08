@@ -16,7 +16,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .sink import EventSink
-from .events import is_web_event
+from .events import is_web_event, TextDelta
 from ..persist.paths import events_path
 
 
@@ -29,6 +29,10 @@ class EventStore(EventSink):
         self._fh = None
 
     def emit(self, event) -> None:
+        # delta 是瞬时流式(逐 token),不落盘——events.jsonl 保持消息级,
+        # 恢复时用 AssistantMessage 的权威全文,不用 delta 重建(避免体积爆炸 + 重建失真)。
+        if isinstance(event, TextDelta):
+            return
         if not is_web_event(event):
             return
         if self._fh is None:
