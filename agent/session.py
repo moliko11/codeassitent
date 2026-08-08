@@ -98,7 +98,7 @@ class Session:
         return base
 
     async def run_turn(self, user_input: str, frontend_sink: EventSink,
-                       *, notification: Optional[tuple] = None) -> AgentState:
+                       *, notification: Optional[tuple] = None, finalize: bool = True) -> AgentState:
         """跑一轮的公共机制(用户 turn 与后台自动 turn 共用)。
 
         - 新 AgentState(共享 self.messages;max_steps 是单轮上限,不继承历史 step 预算)
@@ -106,9 +106,11 @@ class Session:
           防跨 session ContextVar 泄漏)
         - 持 turn_lock 串行(用户 turn 与后台自动 turn 互斥;REPL 单线程锁无竞争)
         - 发 RunStart(notification 非 None 先发 TaskNotification)-> _run_turn
-          -> 锁内同步 self.messages -> 发 RunEnd
-        - 收尾:标题推导 + 增量落盘 run_meta(崩在下一轮前也保留)
-        异常兜底:state.fail + 照发 RunEnd,不让一轮崩溃带崩 session(前端凭 RunEnd 收尾)。
+          -> 锁内同步 self.messages -> 发 RunEnd(finalize=True 时)
+        - 收尾:标题推导 + 增量落盘 run_meta(崩在下一轮前也保留;finalize=True 时)
+        finalize=False:子 agent 用(它是父 run 的一部分)——不发 RunEnd、不写 run_meta,
+        事件经共享 frontend_sink 进父 trace/events。
+        异常兜底:state.fail(照发 RunEnd 仅 finalize=True,不让一轮崩溃带崩 session)。
         事件经 frontend_sink 转发给调用方,调用方负责自己的通道(SSE/渲染)。
         """
         if self.config is None or self.model_adapter is None:
@@ -141,8 +143,11 @@ class Session:
         except Exception as e:
             if not state.is_terminal():
                 state.fail({"type": type(e).__name__, "message": str(e)})
-        _emit_run_end(state, sink)
-        self._finalize(state)
+        if finalize:
+            # 收尾(发 RunEnd + 落 run_meta)。子 agent(finalize=False)不发 turn 边界事件、
+            # 不写 run_meta——它是父 run 的一部分,事件经共享 sink 进父 trace/events。
+            _emit_run_end(state, sink)
+            self._finalize(state)
         return state
 
     def _finalize(self, state: AgentState) -> None:

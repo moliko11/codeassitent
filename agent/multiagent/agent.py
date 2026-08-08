@@ -1,8 +1,9 @@
 # multiagent/agent.py - Agent 抽象(阶段10,题1/2)
 # Agent = 一个可独立 loop 的单元(role/tools/config/runtime + async run)。
-# 复用 async _run_turn(通过 RuntimeContext),不重写 loop。对标 CC runAgent 递归 query()。
-# 子 agent 隔离:dataclasses.replace 出独立 runtime(共享 registry/adapter/sink,独立 config+state),
-# 不污染父;messages 继承父的(简化,§8.3;CC 克隆 toolUseContext 留 TODO)。
+# run 走 Session.run_turn(finalize=False)——子 agent 是共享父 runtime 的轻量 Session,
+# 与 CLI/web 同一套会话机制(AgentState 组装/_runtime_state 注入/messages 同步)。
+# 对标 CC runAgent 递归 query()。子 agent 隔离:独立 config+state,不污染父;
+# messages 继承父的(简化,§8.3;CC 克隆 toolUseContext 留 TODO)。
 import uuid
 from dataclasses import dataclass, field, replace
 from typing import Optional
@@ -11,7 +12,6 @@ from ..core.state import AgentState
 from ..runtime import RuntimeContext
 from ..config.config import AgentConfig
 from ..tools import _runtime_state
-from ..runner import _run_turn   # loop 机制在 runner(模块级导入;runner 不反向依赖 multiagent,无环)
 from .blackboard import Blackboard
 
 
@@ -61,7 +61,7 @@ class Agent:
     agent_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
     async def run(self, task: str, blackboard: Optional[Blackboard] = None, persister=None) -> AgentState:
-        """执行任务:子 runtime(独立 config+state)+ blackboard 注入 + 调 _run_turn。
+        """执行任务:子 agent = 共享父 runtime 的轻量 Session,走 Session.run_turn(finalize=False)。
 
         返回子 AgentState(含 final_response)。persister=None 不落盘(§8.3);传 persister 则子 agent
         事件落该 transcript(Task 工具传主 persister + agent_id="subagent",web 可展示子 agent 流)。
@@ -69,19 +69,32 @@ class Agent:
         # commit 10:设当前 agent role(多 Agent tracing;Tracer 把它写进 span attrs)
         _runtime_state.agent_id.set(self.role)
 
-        # 1. 子 agent 隔离:replace 出独立 runtime(共享 registry/adapter/sink,独立 config+state)
-        #    config 覆盖 allowed_tools=self.tools(权限白名单);state 独立(子 AgentState,不共享父)。
-        #    子 agent 事件不打印由 StreamingPrinter 过滤(_runtime_state.agent_id 非 None 即跳过),
-        #    sink 链路保留:子 agent span 照常进父 tracer/主 trace(带 agent_id,题17 多 Agent tracing)。
+        # 子 agent 隔离:轻量 Session(共享 registry/adapter/sink/workspace,独立 config+state)。
+        #   - config 覆盖 allowed_tools=self.tools(权限白名单);messages 继承父(简化)
+        #   - tracer/event_store=None:事件经共享 frontend_sink 进父 trace/events(带 agent_id)
+        #   - finalize=False:不发 RunEnd/不写 run_meta(子 agent 是父 run 的一部分)
+        # 走 Session 而非裸 _run_turn:拿到统一的 AgentState 组装 + _runtime_state 注入 +
+        # messages 同步(与 CLI/web 同一套会话机制)。
         child_config = replace(self.config, allowed_tools=self.tools)
-        child_state = AgentState(max_steps=self.config.max_steps)
-        child_state.messages = list(self.runtime.state.messages)  # 继承父 messages(简化)
-        child_runtime = replace(self.runtime, config=child_config, state=child_state)
+        from ..session import Session
+        child = Session(
+            run_id=self.runtime.state.run_id,
+            messages=list(self.runtime.state.messages),   # 继承父 messages(简化)
+            persister=persister,
+            tracer=None, event_store=None,               # 共享父 sink 链路
+            registry=self.runtime.registry,
+            model_adapter=self.runtime.model_adapter,
+            tool_executor=self.runtime.tool_executor,
+            config=child_config,
+            guardrail_runner=self.runtime.guardrail_runner,
+            memory_store=self.runtime.memory_store,
+            workspace=self.runtime.workspace,
+        )
 
-        # 2. blackboard 快照注入 task(模型可见共享状态);空 blackboard 不注入
+        # blackboard 快照注入 task(模型可见共享状态);空 blackboard 不注入
         task_msg = task
         if blackboard is not None and blackboard.data:
             task_msg = f"{task}\n\n[共享黑板]\n{blackboard.snapshot()}"
 
-        # 3. 复用 _run_turn(react/plan_execute/workflow 由 child_config.mode 决定)
-        return await _run_turn(task_msg, child_state, child_runtime, persister=persister)
+        # 复用 Session.run_turn(react/plan_execute/workflow 由 child_config.mode 决定)
+        return await child.run_turn(task_msg, self.runtime.sink, finalize=False)
