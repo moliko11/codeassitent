@@ -35,14 +35,19 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-function UsageBadge({ usage }: { usage: TokenUsage }) {
+// 整轮总账(turn 结束才显示,对齐 CC result.usage;不再逐条 assistant 消息显示 per-step usage)
+function TurnSummary({ usage, durationMs, numSteps }: {
+  usage: TokenUsage; durationMs?: number; numSteps?: number;
+}) {
   const cached = usage.cached_tokens
     ? ` · cache ${Math.round((usage.cached_tokens / (usage.input_tokens || 1)) * 100)}%`
     : "";
+  const steps = numSteps ? ` · ${numSteps} 步` : "";
+  const dur = durationMs ? ` · ${durationMs.toFixed(0)}ms` : "";
   return (
-    <span className="text-[10.5px] text-[var(--muted-foreground)]/70">
-      in:{usage.input_tokens} out:{usage.output_tokens}{cached}
-    </span>
+    <div className="mt-1.5 text-[10.5px] text-[var(--muted-foreground)]/70">
+      本轮 in:{usage.input_tokens} out:{usage.output_tokens}{cached}{steps}{dur}
+    </div>
   );
 }
 
@@ -51,12 +56,14 @@ interface RowProps {
   content: string;
   thinking?: string;
   toolCalls?: ToolCallView[];
-  usage?: TokenUsage;
+  turnUsage?: TokenUsage;
+  durationMs?: number;
+  numSteps?: number;
   streaming?: boolean;
   status?: "running" | "completed" | "failed";
 }
 
-const MessageRow = memo(function MessageRow({ role, content, thinking, toolCalls, usage, streaming, status }: RowProps) {
+const MessageRow = memo(function MessageRow({ role, content, thinking, toolCalls, turnUsage, durationMs, numSteps, streaming, status }: RowProps) {
   if (role === "user") {
     return (
       <div className="flex justify-end">
@@ -114,8 +121,11 @@ const MessageRow = memo(function MessageRow({ role, content, thinking, toolCalls
             )}
             <div className="mt-1 flex items-center gap-3">
               {!streaming && content && <CopyButton text={content} />}
-              {usage && <UsageBadge usage={usage} />}
             </div>
+            {/* turn 结束才显示整轮 token 总账(对齐 CC result),不逐条消息显示 */}
+            {turnUsage && !streaming && (
+              <TurnSummary usage={turnUsage} durationMs={durationMs} numSteps={numSteps} />
+            )}
           </>
         )}
       </div>
@@ -184,7 +194,9 @@ export default function MessageList({
             content={m.content}
             thinking={m.thinking}
             toolCalls={m.toolCalls}
-            usage={m.usage}
+            turnUsage={m.turnUsage}
+            durationMs={m.durationMs}
+            numSteps={m.numSteps}
             streaming={m.streaming}
             status={m.status}
           />

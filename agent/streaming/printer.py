@@ -109,7 +109,7 @@ class StreamingPrinter(EventSink):
                 summ = f" {summary}" if summary else ""
                 self._write(self._c(_DIM, f"  ⎿ {tag}{tail}{summ}") + "\n")
 
-            case RunEnd(status, final_text, error):
+            case RunEnd(status=status, error=error):
                 self._ensure_newline()
                 if status != "completed":
                     msg = (error or {}).get("message", "") if error else ""

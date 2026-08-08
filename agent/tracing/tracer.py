@@ -88,7 +88,7 @@ class Tracer(EventSink):
                 if self._stack and self._stack[-1].type == "step":
                     self._stack.pop().finish()
 
-            case RunEnd(status, final_text, error):
+            case RunEnd(status=status):
                 if self._run_span is not None:
                     # 不新建:finish 会重设 end 到本轮末 + 更新 status(会话 duration =
                     # 首轮 start ~ 本轮 end)。多轮复用同一 run span,不再 pop 丢弃。

@@ -28,7 +28,10 @@ export interface ChatMessage {
   content: string;          // AssistantMessage.text(整包,非累积)
   thinking?: string;        // AssistantMessage.thinking(整包,折叠展示)
   toolCalls?: ToolCallView[];
-  usage?: TokenUsage;       // AssistantMessage.usage(每 step 独立)
+  usage?: TokenUsage;       // AssistantMessage.usage(每 step 独立,数据保留;展示不用)
+  turnUsage?: TokenUsage;   // RunEnd 携带的整轮聚合(对齐 CC result.usage)——只在 turn 结束显示总账
+  durationMs?: number;      // RunEnd.duration_ms(本轮耗时)
+  numSteps?: number;        // RunEnd.num_steps(本轮步数,对齐 CC num_turns)
   streaming?: boolean;
   status?: "running" | "completed" | "failed";
   createdAt: number;

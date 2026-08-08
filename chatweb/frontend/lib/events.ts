@@ -10,7 +10,15 @@ import type { ChatMessage, ToolCallView, TokenUsage } from "./types";
 
 export type StreamEvent =
   | { type: "RunStart"; run_id: string }
-  | { type: "RunEnd"; status: string; final_text: string | null; error: Record<string, unknown> | null }
+  | {
+      type: "RunEnd";
+      status: string;
+      final_text: string | null;
+      error: Record<string, unknown> | null;
+      usage: TokenUsage | null; // 整轮聚合(对齐 CC result.usage;turn 结束才显示总账)
+      duration_ms: number | null;
+      num_steps: number | null;
+    }
   | {
       type: "AssistantMessage";
       run_id: string;
@@ -183,6 +191,14 @@ export function eventReducer(state: ChatState, ev: StreamEvent): ChatState {
             status: ev.status === "completed" ? "completed" : "failed",
             // 最后一条无文本(纯工具轮)时用 final_text 兜底
             content: m.content || (isLast ? finalText : ""),
+            // 整轮总账挂最后一条 assistant(对齐 CC result:turn 结束才报 token 总统计)
+            ...(isLast && ev.usage
+              ? {
+                  turnUsage: ev.usage,
+                  durationMs: ev.duration_ms ?? undefined,
+                  numSteps: ev.num_steps ?? undefined,
+                }
+              : {}),
           };
         }),
       };

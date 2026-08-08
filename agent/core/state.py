@@ -181,6 +181,13 @@ class AgentState:
     # 当前Agent循环错误信息
     error: dict[str, Any] | None = None
 
+    # 本轮 token 累计(对齐 CC QueryEngine.totalUsage:每条 assistant 消息 usage 累加,
+    # RunEnd 事件带整轮聚合;每轮新 AgentState 归零,不含子 agent——子 agent 各自 state 累计)
+    token_input: int = 0
+    token_output: int = 0
+    token_total: int = 0
+    token_cached: int = 0
+
     version: int = 0  # 乐观锁版本号，每次状态变更 +1
     # Agent循环元数据
     meta: dict[str, Any] = field(default_factory=dict)

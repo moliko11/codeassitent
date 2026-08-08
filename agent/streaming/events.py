@@ -78,10 +78,15 @@ class StepEnd:
 
 @dataclass(frozen=True)
 class RunEnd:
-    """一次 agent 运行结束（终态）"""
+    """一次 agent 运行结束（终态）。usage/duration_ms/num_steps = 本轮聚合统计
+    （对齐 CC `result` 事件：整轮所有 assistant 消息 usage 累加，turn 结束才报总账；
+    与每条 assistant 消息自带的 per-step usage 互补）。"""
     status: str
     final_text: str | None = None
     error: dict[str, Any] | None = None
+    usage: dict[str, int] | None = None      # 本轮聚合:input/output/total/cached(不含子 agent,子 agent 各自累计)
+    duration_ms: float | None = None         # 本轮耗时(首 step start ~ 末 step end)
+    num_steps: int | None = None             # 本轮 step 数(对齐 CC result.num_turns)
 
 
 @dataclass(frozen=True)

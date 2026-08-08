@@ -170,6 +170,15 @@ async def _run_steps(state: AgentState, context: RuntimeContext, persister, subt
             )
             step.model_response = model_response
 
+            # 本轮 token 累计(对齐 CC QueryEngine.totalUsage:每条 assistant 消息 usage 累加,
+            # RunEnd 事件带整轮聚合;子 agent 有独立 state,不混入本 state)
+            _u = getattr(model_response, "usage", None)
+            if _u is not None:
+                state.token_input += getattr(_u, "input_tokens", 0) or 0
+                state.token_output += getattr(_u, "output_tokens", 0) or 0
+                state.token_total += getattr(_u, "total_tokens", 0) or 0
+                state.token_cached += getattr(_u, "cached_tokens", 0) or 0
+
             # 阶段8: on_output Guardrail(PII 脱敏)在落盘前--否则 transcript 先存原始 PII,内存才脱敏,
             # 脱敏被落盘击败(#12)。对所有回复都过(工具轮 text 通常为空,无副作用;脱敏进 messages+final)。
             if context.guardrail_runner is not None:
@@ -424,11 +433,26 @@ async def _run_workflow(state: AgentState, context: RuntimeContext, persister):
 
 
 def _emit_run_end(state: AgentState, sink):
-    """发 RunEnd 流式事件（UI 用）。final_text 从 final_response 取。"""
+    """发 RunEnd 流式事件（UI 用）。final_text 从 final_response 取。
+
+    usage/duration_ms/num_steps = 本轮聚合统计(对齐 CC `result` 事件):
+    usage 来自 state.token_*（_run_steps 每条 ModelResponse.usage 累加,不含子 agent);
+    前端/CLI 只在 turn 结束显示总账,不在每条 assistant 消息上显示 per-step usage。
+    """
     final_text = None
     if state.final_response is not None:
         final_text = getattr(state.final_response, "text", None)
-    sink.emit(RunEnd(status=state.status, error=state.error, final_text=final_text))
+    usage = None
+    if state.token_total or state.token_input or state.token_output:
+        usage = {"input_tokens": state.token_input, "output_tokens": state.token_output,
+                 "total_tokens": state.token_total, "cached_tokens": state.token_cached}
+    duration_ms = None
+    if state.steps and state.steps[0].started_at is not None:
+        ends = [s.ended_at for s in state.steps if s.ended_at is not None]
+        if ends:
+            duration_ms = round((max(ends) - state.steps[0].started_at) * 1000, 2)
+    sink.emit(RunEnd(status=state.status, error=state.error, final_text=final_text,
+                     usage=usage, duration_ms=duration_ms, num_steps=len(state.steps)))
 
 def _end_run(state: AgentState, sink, persister):
     """单次调用收尾：发 RunEnd + log_run_end + close（agentloop / continue_loop 复用）。"""
@@ -513,26 +537,6 @@ def _write_run_start_meta(run_id: str, model: str, system_prompt: str):
         "system_prompt": system_prompt,
     }
     run_meta_path(run_id).write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
-
-
-def _sum_step_usage(spans) -> tuple[int, int, int, int]:
-    """sum step span 的 usage,返回 (input, output, total, cached)。total=0 用 input+output 兜底(坑4)。
-    REPL 每轮末尾打印 token 用:本轮 = 新增 span,累计 = 全部 span。"""
-    ti = to = tt = tc = 0
-    for s in spans:
-        if s.type != "step":
-            continue
-        u = s.attrs.get("usage")
-        if not u:
-            continue
-        i = u.get("input_tokens", 0) or 0
-        o = u.get("output_tokens", 0) or 0
-        t = u.get("total_tokens", 0) or 0
-        ti += i
-        to += o
-        tt += t if t > 0 else i + o
-        tc += u.get("cached_tokens", 0) or 0
-    return ti, to, tt, tc
 
 
 def _rate(c: int, i: int) -> str:
@@ -680,15 +684,16 @@ async def run_agent_loop(registry: ToolRegistry,
         # 新 list(copy)，state.messages 会离开共享 messages 对象，故每轮结束用 messages = state.messages
         # 同步（见下），否则下一轮丢失上一轮 assistant + tool_result（bug2）。
         context.sink.emit(RunStart(run_id=session_run_id))   # 走 CompositeSink(printer+tracer),让 tracer 收到 RunStart 建 run span
-        spans_before = len(tracer.trace.spans)          # 记本轮前 span 数,差出本轮新增(算本轮 token)
         state = await _run_turn(user_input, state, context, persister)
         _emit_run_end(state, context.sink)   # 走 CompositeSink -> tracer 收 RunEnd 落盘 trace.jsonl(修 REPL 无 trace 的坑)
         # 每轮末尾:聚合 Metrics(会话级累计)+ 打印 token + 增量落盘 run_meta
         # 增量写:每轮结束就落盘(累计),崩在下一轮前也保留到最近完成的轮(用户要求,不依赖 exit)
         from .tracing.metrics import MetricsCollector
         rep = MetricsCollector().collect(tracer.trace)
-        turn_in, turn_out, _, turn_cached = _sum_step_usage(tracer.trace.spans[spans_before:])
-        print(f"  [本轮 in:{turn_in} out:{turn_out} cache:{turn_cached}({_rate(turn_cached, turn_in)}) / "
+        # 本轮 token 用 state 累计(对齐 RunEnd.usage,不含子 agent——子 agent 各自 state 累计;
+        # 累计 用 MetricsCollector 跨所有 span 含子 agent,是会话总账)
+        print(f"  [本轮 in:{state.token_input} out:{state.token_output} "
+              f"cache:{state.token_cached}({_rate(state.token_cached, state.token_input)}) / "
               f"累计 in:{rep.token_input} out:{rep.token_output} cache:{rep.token_cached}({_rate(rep.token_cached, rep.token_input)})]")
         _write_run_meta(state, rep, config.model)
         messages = state.messages   # 同步共享 list（append 返回 copy，state.messages 已离开原对象）

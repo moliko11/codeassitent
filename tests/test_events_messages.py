@@ -114,6 +114,19 @@ def test_assistant_and_tool_result_messages_emitted():
         assert r.attempts == 1
 
 
+def test_run_end_carries_turn_aggregate_usage():
+    """RunEnd 带整轮聚合 usage(对齐 CC result 事件):所有 step 的 usage 累加,不是只最后一步。
+    前端据此在 turn 结束时显示总账,不再逐条 assistant 消息显示 per-step usage。"""
+    sink = _run(tool_rounds=2)
+    ends = [e for e in sink.events if isinstance(e, RunEnd)]
+    assert len(ends) == 1
+    # step1(101/50/151) + step2(102/50/152) + final(300/100/400) = 503/200/703
+    assert ends[0].usage == {"input_tokens": 503, "output_tokens": 200,
+                             "total_tokens": 703, "cached_tokens": 0}
+    assert ends[0].num_steps == 3          # 对齐 CC result.num_turns
+    assert ends[0].duration_ms is not None and ends[0].duration_ms > 0
+
+
 def test_tool_result_error_carries_error_type():
     """失败工具结果:ok=False + error_type(前端 phase=error 分类用)。"""
     reg = ToolRegistry()
