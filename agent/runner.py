@@ -223,7 +223,7 @@ async def _run_steps(state: AgentState, context: RuntimeContext, persister, subt
 
             async for r in context.tool_executor.execute_many(
                 model_response.tool_calls, timeout=config.step_timeout, sink=sink
-            ):
+            ): 
                 # Task 工具:拦截 subagent 请求(handler 同步跑不了 async agent.run),
                 # 异步跑子 agent 用其结果替换 tool result(对标 NeedsApproval 的拦截模式)
                 if r.ok and isinstance(r.data, dict) and r.data.get("__subagent__"):

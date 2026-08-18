@@ -15,13 +15,17 @@ class GuardrailResult:
     - passed=True + action=allow:通过
     - passed=False + action=block:拦截(不执行/不回填)
     - action=sanitize:passed=True 但内容需脱敏(sanitized 放脱敏后内容)
+    passed:这个结果是否通过。False=阻止/拦截,True=放行(可附带脱敏)
+    reason:简短说明,可给用户/日志。""(空串)表示
+    action:放行/阻止/脱敏。allow=放行,block=阻止, sanitize=脱敏(放行但内容被 sanitize)
+    sanitized:action=sanitize 时放脱敏后的内容,否则 None。
 
     阶段0(Phase A):needs_approval 已删——HITL 提到 async can_use_tool(executor 层,
     工具执行前,走 confirmer),不再由同步 guardrail 产 HITL 信号。见 hitl-approval-design.md §3。
     """
     passed: bool
     reason: str = ""
-    action: Literal["allow", "block", "sanitize"] = "allow"
+    action: Literal["allow", "block", "sanitize"] = "allow" #放行 清洗 阻止
     sanitized: Any = None  # action=sanitize 时放脱敏后的内容
 
 

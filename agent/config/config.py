@@ -8,7 +8,7 @@ class AgentConfig:
     # 系统提示词：定义 Agent 的行为契约，作为 messages 的第一条注入。
     # 默认与 agentloop 控制流对齐（见 prompts.py）；传空串可禁用。
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
-    model: str = "deepseek-v4-pro"
+    model: str = "deepseek-v4-flash"
     temperature: float = 0.7
     max_tokens: int = 30000
     max_steps: int = 25 # 最大循环步数，超过则强制结束循环（防止无限循环）
